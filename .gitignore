@@ -1,0 +1,91 @@
+# =====================
+# Python / Jupyter
+# =====================
+__pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+.env
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebook (выводы и контрольные точки)
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+*.pkl
+*.pickle
+*.joblib
+
+# =====================
+# Docker / volumes (локальные данные)
+# =====================
+# PostgreSQL data
+postgres-data/
+pgdata/
+*.sql
+!docker-entrypoint-initdb.d/*.sql  # исключить, если нужны инициализационные скрипты
+
+# MinIO data
+minio-data/
+minio/
+*.minio.sys
+
+# Superset local configs / metadata
+superset.db
+superset_config.py
+*.superset.db
+superset_home/
+*.json  # если не хотите хранить экспорт дашбордов, иначе уточнить
+
+# Airflow
+airflow.db
+airflow.cfg
+logs/
+airflow-webserver.pid
+*.pid
+
+# =====================
+# IDE / OS
+# =====================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =====================
+# Project specific (локальные данные и артефакты)
+# =====================
+/data/raw/
+/data/processed/
+/data/external/
+*.parquet
+*.csv
+!test_*.csv   # если нужны тестовые маленькие файлы – исключить
+*.log
+*.tmp
+
+# ML models (если не хотите хранить бинарники в репозитории)
+models/*.pkl
+models/*.joblib
+!models/.gitkeep
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# =====================
+# macOS / Linux / Windows
+# =====================
+.directory
+*.lnk
