@@ -14,7 +14,9 @@ x-logging: &default-logging
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.8.1-python3.11
+  build:
+    context: .
+    dockerfile: Dockerfile
   environment: *airflow-env
   volumes:
     - ./dags:/opt/airflow/dags
