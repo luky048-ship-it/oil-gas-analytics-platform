@@ -8,6 +8,10 @@ x-logging: &default-logging
     max-file: "3"
 
   x-airflow-env: &airflow-env
+    MINIO_ROOT_USER: admin
+    MINIO_ROOT_PASSWORD: super_secret_minio_password
+    MINIO_ENDPOINT: http://minio:9000
+    MINIO_DEFAULT_BUCKET: datalake
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB}
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'

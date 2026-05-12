@@ -89,3 +89,4 @@ models/*.joblib
 # =====================
 .directory
 *.lnk
+.aider*

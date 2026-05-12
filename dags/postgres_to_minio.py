@@ -1,15 +1,54 @@
 from __future__ import annotations
 
+import io
+import logging
 import os
 from datetime import datetime
-from typing import Dict, Any
+from typing import Any, Dict
 
 import pandas as pd
 import s3fs
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from sqlalchemy import create_engine
+
+
+# ---------------------------------------------------------------------------
+# Методы для работы с мета‑таблицей loaded_partitions
+# ---------------------------------------------------------------------------
+def is_partition_loaded(table_name: str, ds: str) -> bool:
+    """Проверить, загружалась ли уже партиция ``ds`` для ``table_name``.
+
+    Возвращает ``True`` если запись существует в ``etl_metadata.loaded_partitions``.
+    """
+    hook = PostgresHook(postgres_conn_id="postgres_default")
+    with hook.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM etl_metadata.loaded_partitions "
+                "WHERE table_name=%s AND partition_date=%s",
+                (table_name, ds),
+            )
+            return cur.fetchone() is not None
+
+
+def mark_partition_loaded(table_name: str, ds: str, dag_run_id: str) -> None:
+    hook = PostgresHook(postgres_conn_id="postgres_default")
+    with hook.get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO etl_metadata.loaded_partitions
+                (table_name, partition_date, dag_run_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (table_name, ds, dag_run_id),
+            )
+        conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # Конфигурация таблиц
@@ -28,38 +67,54 @@ TABLES_CONFIG: Dict[str, Dict[str, Any]] = {
     "oil_stations": {"date_col": None, "is_fact": False},
 }
 
-# Параметры подключения к MinIO (берутся из .env или переменных окружения)
-S3_ENDPOINT = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
-S3_ACCESS_KEY = os.getenv("MINIO_ROOT_USER", "admin")
-S3_SECRET_KEY = os.getenv("MINIO_ROOT_PASSWORD", "password")
+# ---------------------------------------------------------------------------
+# MinIO connection handling
+# ---------------------------------------------------------------------------
+
+
+def _get_minio_credentials() -> Dict[str, str]:
+    access_key = os.getenv("MINIO_ACCESS_KEY")
+    secret_key = os.getenv("MINIO_SECRET_KEY")
+    endpoint = os.getenv("MINIO_ENDPOINT_URL")
+
+    if not (access_key and secret_key and endpoint):
+        hook = S3Hook(aws_conn_id="minio_default")
+        conn = hook.get_connection("minio_default")
+        access_key = access_key or conn.login
+        secret_key = secret_key or conn.password
+        endpoint = endpoint or conn.extra_dejson.get(
+            "endpoint_url", "http://minio:9000"
+        )
+
+    if not (access_key and secret_key and endpoint):
+        raise ValueError(
+            "MinIO credentials are incomplete. Check env vars or Airflow connection."
+        )
+
+    return {"access_key": access_key, "secret_key": secret_key, "endpoint": endpoint}
+
+
 S3_BUCKET = os.getenv("MINIO_DEFAULT_BUCKET", "datalake")
 
-# Словарь доступов для pandas
-STORAGE_OPTIONS = {
-    "key": S3_ACCESS_KEY,
-    "secret": S3_SECRET_KEY,
-    "client_kwargs": {"endpoint_url": S3_ENDPOINT},
-}
 
+def extract_load(table_name: str, cfg: Dict[str, Any], ds: str, **context: Any) -> None:
+    dag_run_id: str = context["dag_run"].run_id
 
-def extract_load(table_name: str, cfg: Dict[str, Any], ds: str, **kwargs) -> None:
-    """Выгрузить данные из PostgreSQL и записать их в MinIO."""
-
-    # 1. Формируем пути и проверяем идемпотентность
-    fs = s3fs.S3FileSystem(**STORAGE_OPTIONS)
-
-    if cfg["is_fact"]:
-
-        check_path = f"{S3_BUCKET}/raw/{table_name}/partition_date={ds}"
-    else:
-
-        check_path = f"{S3_BUCKET}/raw/{table_name}/{table_name}.parquet"
-
-    if fs.exists(check_path):
-        print(f"Данные по пути {check_path} уже существуют. Пропуск (Skip).")
+    # 1. Skip already loaded partitions for fact tables
+    if cfg["is_fact"] and is_partition_loaded(table_name, ds):
+        logging.info("Данные за %s для %s уже загружены. Пропускаем.", ds, table_name)
         return
 
-    # 2. Подключаемся к PostgreSQL. Приоритет: Airflow connection, затем переменные .env
+    # 2. Resolve MinIO credentials and build storage options
+    creds = _get_minio_credentials()
+    storage_options = {
+        "key": creds["access_key"],
+        "secret": creds["secret_key"],
+        "client_kwargs": {"endpoint_url": creds["endpoint"]},
+    }
+    fs = s3fs.S3FileSystem(**storage_options)
+
+    # 3. Connect to PostgreSQL (fallback to DSN from env if hook fails)
     try:
         pg_hook = PostgresHook(postgres_conn_id="postgres_default")
         engine = pg_hook.get_sqlalchemy_engine()
@@ -72,47 +127,54 @@ def extract_load(table_name: str, cfg: Dict[str, Any], ds: str, **kwargs) -> Non
         dsn = f"postgresql://{pg_user}:{pg_password}@{pg_host}:{pg_port}/{pg_db}"
         engine = create_engine(dsn)
 
-    # 3. Формируем SQL-запрос и читаем данные
-    if cfg["is_fact"]:
-        sql = f"SELECT * FROM {table_name} WHERE DATE({cfg['date_col']}) = '{ds}'"
-    else:
-        sql = f"SELECT * FROM {table_name}"
-
-    print(f"Выполнение запроса: {sql}")
+    # 4. Build SQL and load data
+    sql = (
+        f"SELECT * FROM {table_name} WHERE DATE({cfg['date_col']}) = '{ds}'"
+        if cfg["is_fact"]
+        else f"SELECT * FROM {table_name}"
+    )
+    logging.info("Выполнение запроса: %s", sql)
     df = pd.read_sql(sql, engine)
 
     if df.empty:
-        print(f"Нет данных для выгрузки (таблица {table_name}, дата {ds}).")
+        logging.warning(
+            "Нет данных для выгрузки (таблица %s, дата %s).", table_name, ds
+        )
         return
 
-    # 4. Сохраняем в MinIO
-    base_s3_uri = f"s3://{S3_BUCKET}/raw/{table_name}"
-
+    # 5. Prepare Parquet buffer
+    parquet_buffer = io.BytesIO()
     if cfg["is_fact"]:
-
         df[cfg["date_col"]] = pd.to_datetime(df[cfg["date_col"]])
         df["partition_date"] = df[cfg["date_col"]].dt.date
-
         df.to_parquet(
-            base_s3_uri,
+            parquet_buffer,
             engine="pyarrow",
             compression="snappy",
             partition_cols=["partition_date"],
-            storage_options=STORAGE_OPTIONS,
             index=False,
         )
+        # Construct path with partition placeholder – s3fs will handle directories
+        s3_path = f"s3://{S3_BUCKET}/raw/{table_name}/partition_date={ds}/data.parquet"
     else:
-
-        file_s3_uri = f"{base_s3_uri}/{table_name}.parquet"
         df.to_parquet(
-            file_s3_uri,
+            parquet_buffer,
             engine="pyarrow",
             compression="snappy",
-            storage_options=STORAGE_OPTIONS,
             index=False,
         )
+        s3_path = f"s3://{S3_BUCKET}/raw/{table_name}/{table_name}.parquet"
 
-    print(f"Таблица {table_name} успешно выгружена!")
+    parquet_buffer.seek(0)
+    # 6. Write to MinIO
+    with fs.open(s3_path, "wb") as f:
+        f.write(parquet_buffer.read())
+
+    logging.info("Таблица %s успешно выгружена!", table_name)
+
+    # 7. Mark partition as loaded for fact tables
+    if cfg["is_fact"]:
+        mark_partition_loaded(table_name, ds, dag_run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +191,7 @@ with DAG(
     default_args=default_args,
     description="Инкрементальная выгрузка данных из PostgreSQL в MinIO",
     schedule_interval="@daily",
-    start_date=datetime(2025, 10, 1),
+    start_date=datetime(2023, 1, 1),
     catchup=True,
     tags=["hw", "etl", "minio"],
     max_active_runs=1,
@@ -139,5 +201,10 @@ with DAG(
         PythonOperator(
             task_id=f"extract_load_{tbl}",
             python_callable=extract_load,
-            op_kwargs={"table_name": tbl, "cfg": cfg},
+            op_kwargs={
+                "table_name": tbl,
+                "cfg": cfg,
+                "ds": "{{ ds }}",
+            },
+            provide_context=True,
         )
