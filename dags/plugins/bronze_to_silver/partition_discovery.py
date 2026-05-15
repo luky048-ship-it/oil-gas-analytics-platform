@@ -33,7 +33,7 @@ def discover_incremental_partitions(
             dataset_path, filesystem=s3_fs, format="parquet", partitioning="hive"
         )
     except Exception as e:
-        logger.warning(f"Failed to load dataset at {dataset_path}: {e}")
+        logger.warning(f"Dataset path {dataset_path} not found or inaccessible: {e}")
         return []
 
     watermark_date = watermark.date() if watermark else None
@@ -41,10 +41,14 @@ def discover_incremental_partitions(
 
     for file_path in dataset_info.files:
         # Extract directory path: e.g. datalake/raw/production/partition_date=2024-01-01
-        dir_path = "/".join(file_path.split("/")[:-1])
+        dir_parts = file_path.split("/")
+        if len(dir_parts) <= 1:
+            continue
+
+        dir_path = "/".join(dir_parts[:-1])
 
         if "partition_date=" not in dir_path:
-            # For non-partitioned tables, add the base directory if not watermark restricted
+            # Master data tables like 'wells' might not have partition_date
             valid_partition_paths.add(f"s3://{dataset_path}")
             continue
 

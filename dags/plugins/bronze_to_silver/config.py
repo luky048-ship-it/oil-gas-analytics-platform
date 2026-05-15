@@ -1,7 +1,7 @@
-from __future__ import annotations
 import polars as pl
+from typing import Dict, Any
 
-SCHEMA_CONTRACTS = {
+SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
     "wells": {
         "columns": {
             "well_id": pl.Int32(),
@@ -14,15 +14,17 @@ SCHEMA_CONTRACTS = {
         },
         "primary_key": ["well_id"],
         "foreign_keys": {},
-        "time_column": None,
+        "time_column": "start_date",
         "dedup_key": ["well_id"],
         "validation_rules": {
-            "enums": {"status": ["active", "inactive", "maintenance", "decommissioned"]},
+            "enums": {
+                "status": ["active", "inactive", "maintenance", "decommissioned"]
+            },
             "ranges": {},
-            "custom": [],
+            "custom": [{"rule": "start_date <= current_date", "severity": "HIGH"}],
         },
         "outlier_columns": [],
-        "missing_rules": {},
+        "missing_rules": {"operator": {"strategy": "fill_value", "value": "UNKNOWN"}},
     },
     "production": {
         "columns": {
@@ -40,7 +42,7 @@ SCHEMA_CONTRACTS = {
         "primary_key": ["prod_id"],
         "foreign_keys": {"well_id": "wells.well_id"},
         "time_column": "date",
-        "dedup_key": ["prod_id"],
+        "dedup_key": ["prod_id", "date"],
         "validation_rules": {
             "enums": {},
             "ranges": {
@@ -54,8 +56,21 @@ SCHEMA_CONTRACTS = {
             },
             "custom": [],
         },
-        "outlier_columns": ["oil_ton", "gas_m3", "water_m3"],
-        "missing_rules": {},
+        "outlier_columns": [
+            "oil_ton",
+            "gas_m3",
+            "water_m3",
+            "energy_kwh",
+            "temperature",
+            "pressure",
+        ],
+        "missing_rules": {
+            "oil_ton": {"strategy": "fill_value", "value": 0.0},
+            "gas_m3": {"strategy": "fill_value", "value": 0.0},
+            "water_m3": {"strategy": "fill_value", "value": 0.0},
+            "energy_kwh": {"strategy": "fill_value", "value": 0.0},
+            "downtime_hours": {"strategy": "fill_value", "value": 0.0},
+        },
     },
     "well_telemetry": {
         "columns": {
@@ -73,7 +88,7 @@ SCHEMA_CONTRACTS = {
         "primary_key": ["record_id"],
         "foreign_keys": {"well_id": "wells.well_id"},
         "time_column": "timestamp",
-        "dedup_key": ["record_id"],
+        "dedup_key": ["record_id", "timestamp"],
         "validation_rules": {
             "enums": {},
             "ranges": {
@@ -83,8 +98,52 @@ SCHEMA_CONTRACTS = {
             },
             "custom": [{"rule": "pressure_out >= pressure_in", "severity": "MEDIUM"}],
         },
-        "outlier_columns": ["vibration", "temperature", "oil_flow_rate"],
-        "missing_rules": {},
+        "outlier_columns": [
+            "pump_speed_rpm",
+            "pump_current",
+            "pressure_in",
+            "pressure_out",
+            "temperature",
+            "vibration",
+            "oil_flow_rate",
+        ],
+        "missing_rules": {
+            "pump_speed_rpm": {
+                "strategy": "forward_fill",
+                "partition_by": "well_id",
+                "order_by": "timestamp",
+            },
+            "pump_current": {
+                "strategy": "forward_fill",
+                "partition_by": "well_id",
+                "order_by": "timestamp",
+            },
+            "pressure_in": {
+                "strategy": "forward_fill",
+                "partition_by": "well_id",
+                "order_by": "timestamp",
+            },
+            "pressure_out": {
+                "strategy": "forward_fill",
+                "partition_by": "well_id",
+                "order_by": "timestamp",
+            },
+            "temperature": {
+                "strategy": "forward_fill",
+                "partition_by": "well_id",
+                "order_by": "timestamp",
+            },
+            "vibration": {
+                "strategy": "forward_fill",
+                "partition_by": "well_id",
+                "order_by": "timestamp",
+            },
+            "oil_flow_rate": {
+                "strategy": "forward_fill",
+                "partition_by": "well_id",
+                "order_by": "timestamp",
+            },
+        },
         "aggregation": {
             "key": "well_id",
             "time_column": "timestamp",
@@ -167,7 +226,33 @@ SCHEMA_CONTRACTS = {
             "custom": [],
         },
         "outlier_columns": ["temperature", "vibration", "current", "rpm", "pressure"],
-        "missing_rules": {},
+        "missing_rules": {
+            "temperature": {
+                "strategy": "forward_fill",
+                "partition_by": "pump_id",
+                "order_by": "timestamp",
+            },
+            "vibration": {
+                "strategy": "forward_fill",
+                "partition_by": "pump_id",
+                "order_by": "timestamp",
+            },
+            "current": {
+                "strategy": "forward_fill",
+                "partition_by": "pump_id",
+                "order_by": "timestamp",
+            },
+            "rpm": {
+                "strategy": "forward_fill",
+                "partition_by": "pump_id",
+                "order_by": "timestamp",
+            },
+            "pressure": {
+                "strategy": "forward_fill",
+                "partition_by": "pump_id",
+                "order_by": "timestamp",
+            },
+        },
         "aggregation": {
             "key": "pump_id",
             "time_column": "timestamp",

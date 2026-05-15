@@ -10,8 +10,7 @@ logger = logging.getLogger(__name__)
 
 def get_s3_storage_options(conn_id: str = "aws_default") -> Dict[str, Any]:
     """
-    Fetches S3 credentials from Airflow Connection and formats them
-    for Polars and PyArrow storage_options.
+    Fetches S3 credentials from Airflow Connection.
     """
     try:
         conn = BaseHook.get_connection(conn_id)
@@ -29,7 +28,7 @@ def get_s3_storage_options(conn_id: str = "aws_default") -> Dict[str, Any]:
 
         return options
     except Exception as e:
-        logger.warning(f"Connection {conn_id} not found: {e}. Using defaults for MinIO.")
+        logger.warning(f"Connection {conn_id} not found: {e}. Using local MinIO defaults.")
         return {
             "aws_access_key_id": "admin",
             "aws_secret_access_key": "password",
@@ -50,7 +49,8 @@ def load_bronze_dataset(
     if not dataset_paths:
         return pl.LazyFrame()
 
-    # Normalize storage options for polars
+    # Normalize storage options for polars scan_parquet
+    # Polars expects: key, secret, endpoint_url, region
     pl_options = {
         "key": storage_options.get("aws_access_key_id"),
         "secret": storage_options.get("aws_secret_access_key"),

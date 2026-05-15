@@ -1,7 +1,10 @@
 from __future__ import annotations
-import polars as pl
+
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+
+import polars as pl
+
 
 @dataclass
 class ForeignKeyContract:
@@ -9,24 +12,59 @@ class ForeignKeyContract:
     parent_table: str
     parent_column: str
 
+
 @dataclass
 class TableContract:
+    """
+    Enterprise Schema Contract definition for Data Quality monitoring.
+    Represents physical schema, business rules, referential integrity, and SLAs.
+    """
+
     schema: Dict[str, pl.DataType]
     primary_keys: List[str]
     not_null_columns: List[str]
+
+    # Validation Rules
     foreign_keys: List[ForeignKeyContract] = field(default_factory=list)
     unique_columns: List[str] = field(default_factory=list)
-    value_ranges: Dict[str, Tuple[Optional[float], Optional[float]]] = field(default_factory=dict)
+    value_ranges: Dict[str, Tuple[Optional[float], Optional[float]]] = field(
+        default_factory=dict
+    )
     enums: Dict[str, List[str]] = field(default_factory=dict)
     custom_rules: List[str] = field(default_factory=list)
+
+    # Observability & SLAs
     freshness_sla_minutes: Optional[int] = None
     partition_column: Optional[str] = None
     statistical_monitored_columns: List[str] = field(default_factory=list)
 
+
+# -----------------------------------------------------------------------------
+# ENUMS & APPROVED VALUES
+# -----------------------------------------------------------------------------
+
 APPROVED_WELL_STATUSES = ["active", "inactive", "maintenance", "decommissioned"]
-APPROVED_FAILURE_TYPES = ["electrical", "mechanical", "overheating", "seal_failure", "vibration_alarm", "pressure_loss", "unknown"]
+
+APPROVED_FAILURE_TYPES = [
+    "electrical",
+    "mechanical",
+    "overheating",
+    "seal_failure",
+    "vibration_alarm",
+    "pressure_loss",
+    "unknown",
+]
+
 APPROVED_PRODUCT_TYPES = ["crude_oil", "condensate", "diesel", "drilling_fluids"]
+
 APPROVED_FUEL_TYPES = ["diesel", "gasoline", "electric", "hybrid", "lng"]
+
+APPROVED_WEATHER_IMPACT = ["high", "medium", "low"]
+
+
+# -----------------------------------------------------------------------------
+# TABLE CONTRACTS REGISTRY
+# -----------------------------------------------------------------------------
 
 TABLE_CONTRACTS: Dict[str, TableContract] = {
     "wells": TableContract(
@@ -40,8 +78,18 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "status": pl.String(),
         },
         primary_keys=["well_id"],
-        not_null_columns=["well_id", "name", "field_name", "region", "start_date", "status"],
+        not_null_columns=[
+            "well_id",
+            "name",
+            "field_name",
+            "region",
+            "start_date",
+            "status",
+        ],
         enums={"status": APPROVED_WELL_STATUSES},
+        custom_rules=["start_date <= current_date"],
+        freshness_sla_minutes=1440,  # 24h
+        partition_column=None,
     ),
     "production": TableContract(
         schema={
@@ -68,6 +116,9 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "pressure": (0.0, 1000.0),
             "temperature": (-60.0, 250.0),
         },
+        freshness_sla_minutes=1440,  # 24h
+        partition_column="date",
+        statistical_monitored_columns=["oil_ton", "gas_m3", "water_m3"],
     ),
     "well_telemetry": TableContract(
         schema={
@@ -90,6 +141,10 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "vibration": (0.0, None),
             "oil_flow_rate": (0.0, None),
         },
+        custom_rules=["pressure_out >= pressure_in"],
+        freshness_sla_minutes=10,  # 10 minutes late arrival window
+        partition_column="event_date",
+        statistical_monitored_columns=["vibration", "temperature", "oil_flow_rate"],
     ),
     "well_targets": TableContract(
         schema={
@@ -114,6 +169,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
         primary_keys=["pump_id"],
         not_null_columns=["pump_id", "well_id", "type", "install_date"],
         foreign_keys=[ForeignKeyContract("well_id", "wells", "well_id")],
+        custom_rules=["install_date <= current_date"],
     ),
     "pump_sensors": TableContract(
         schema={
@@ -134,6 +190,9 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "rpm": (0.0, None),
             "pressure": (0.0, None),
         },
+        freshness_sla_minutes=5,  # 5 min late events
+        partition_column="event_date",
+        statistical_monitored_columns=["vibration", "rpm", "temperature"],
     ),
     "pump_failures": TableContract(
         schema={
@@ -148,6 +207,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
         foreign_keys=[ForeignKeyContract("pump_id", "pumps", "pump_id")],
         value_ranges={"downtime_hours": (0.0, None)},
         enums={"failure_type": APPROVED_FAILURE_TYPES},
+        partition_column="failure_month",
     ),
     "deliveries": TableContract(
         schema={
@@ -165,7 +225,15 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "vehicle_id": pl.Int32(),
         },
         primary_keys=["delivery_id"],
-        not_null_columns=["delivery_id", "date", "source", "destination", "product_type", "driver_id", "vehicle_id"],
+        not_null_columns=[
+            "delivery_id",
+            "date",
+            "source",
+            "destination",
+            "product_type",
+            "driver_id",
+            "vehicle_id",
+        ],
         foreign_keys=[
             ForeignKeyContract("driver_id", "drivers", "driver_id"),
             ForeignKeyContract("vehicle_id", "vehicles", "vehicle_id"),
@@ -177,6 +245,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "distance_km": (0.0001, None),
         },
         enums={"product_type": APPROVED_PRODUCT_TYPES},
+        partition_column="date",
     ),
     "drivers": TableContract(
         schema={
@@ -198,6 +267,8 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
         },
         primary_keys=["vehicle_id"],
         not_null_columns=["vehicle_id", "plate_number"],
+        unique_columns=["plate_number"],
+        value_ranges={"capacity_ton": (0.0001, None)},  # > 0 constraint
         enums={"fuel_type": APPROVED_FUEL_TYPES},
     ),
     "oil_stations": TableContract(

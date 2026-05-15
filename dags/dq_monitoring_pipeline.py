@@ -10,6 +10,7 @@ from airflow.utils.task_group import TaskGroup
 from dq_utils.config import TABLE_CONTRACTS
 from dq_utils.core import execute_dq_pipeline
 from dq_utils.dq_reporter import persist_dq_results
+from dq_utils.freshness_validator import validate_data_freshness
 from dq_utils.pipeline_status import publish_pipeline_status
 from dq_utils.quarantine_writer import write_quarantine_dataset
 from dq_utils.s3_utils import (discover_available_partitions,
@@ -37,23 +38,19 @@ def dq_pipeline():
 
     @task
     def get_s3_opts():
-        return get_s3_storage_options("s3_default")
+        return get_s3_storage_options("aws_default")
 
     s3_opts = get_s3_opts()
 
     for dataset_name, contract in TABLE_CONTRACTS.items():
         with TaskGroup(group_id=f"dq_{dataset_name}") as tg:
 
-            @task(task_id=f"discover_{dataset_name}")
+            @task
             def discover(ds_name, opts, **kwargs):
                 return discover_available_partitions(ds_name, kwargs["ds"], opts)
 
-            @task(task_id=f"process_{dataset_name}")
+            @task
             def process(ds_name, paths, opts, **kwargs):
-                if not paths:
-                    logger.info(f"No paths found for {ds_name}")
-                    return []
-
                 exec_date = kwargs["ds"]
                 contract_obj = TABLE_CONTRACTS[ds_name]
 
@@ -73,15 +70,15 @@ def dq_pipeline():
                 for p in paths:
                     # Валидация файла (Layer 1)
                     file_dq = validate_file_integrity(ds_name, p, opts)
-                    all_dq_results.append({
-                        "dataset": file_dq.dataset,
-                        "validation_type": file_dq.validation_type,
-                        "status": file_dq.status,
-                        "failed_rows": file_dq.failed_rows,
-                        "checked_rows": file_dq.checked_rows,
-                        "message": file_dq.message,
-                        "created_at": file_dq.created_at.isoformat()
-                    })
+                    # Валидация свежести (Layer 5)
+                    fresh_dq = validate_data_freshness(ds_name, exec_date, contract_obj.freshness_sla_minutes or 1440, opts)
+                    all_dq_results.append(fresh_dq.__dict__)
+                    all_dq_results[-1]["created_at"] = all_dq_results[-1]["created_at"].isoformat()
+                    all_dq_results.append(file_dq.__dict__)
+                    # Сериализация даты для XCom
+                    all_dq_results[-1]["created_at"] = all_dq_results[-1][
+                        "created_at"
+                    ].isoformat()
 
                     # Основной процессинг (Layer 2-4, 7)
                     results, v_df, inv_df = execute_dq_pipeline(
@@ -95,6 +92,7 @@ def dq_pipeline():
                             "value_ranges": contract_obj.value_ranges,
                             "enums": contract_obj.enums,
                             "custom_rules": contract_obj.custom_rules,
+                            "statistical_monitored_columns": contract_obj.statistical_monitored_columns,
                         },
                         historical_stats={},
                         execution_date=exec_date,
@@ -106,17 +104,10 @@ def dq_pipeline():
                     # Запись Silver (Используем pyarrow_options для S3)
                     if v_df.height > 0:
                         target = f"s3://datalake/silver/{ds_name}/partition_date={exec_date}/data.parquet"
-                        # Standardizing S3 options for Polars write_parquet
                         v_df.write_parquet(
                             target,
                             use_pyarrow=True,
-                            pyarrow_options={
-                                "storage_options": {
-                                    "key": opts.get("key"),
-                                    "secret": opts.get("secret"),
-                                    "endpoint_url": opts.get("client_kwargs", {}).get("endpoint_url")
-                                }
-                            },
+                            pyarrow_options={"storage_options": opts},
                         )
 
                     # Запись Quarantine
@@ -127,15 +118,19 @@ def dq_pipeline():
 
                 return all_dq_results
 
-            @task(task_id=f"report_{dataset_name}")
+            @task
             def report(ds_name, dq_res, **kwargs):
                 persist_dq_results(dq_res, kwargs["ds"])
 
-            @task(task_id=f"status_{dataset_name}", trigger_rule="all_done")
+            @task(trigger_rule="all_done")
             def status(ds_name, **kwargs):
                 ti = kwargs["ti"]
-                # Adjusted to find the task in the TaskGroup
-                state = "SUCCESS" # Defaulting for now as xcom_pull is tricky in TaskGroups without explicit task_ids
+                # Проверка статуса таски process в этой группе
+                state = (
+                    "SUCCESS"
+                    if ti.xcom_pull(task_ids=f"{tg.group_id}.process")
+                    else "FAILED"
+                )
                 publish_pipeline_status(ds_name, kwargs["ds"], state)
 
             # Flow

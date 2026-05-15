@@ -15,7 +15,7 @@ from dq_utils.dq_reporter import DQResult
 logger = logging.getLogger(__name__)
 
 
-def get_s3_storage_options(conn_id: str = "s3_default") -> dict:
+def get_s3_storage_options(conn_id: str = "aws_default") -> dict:
     """
     Retrieves credentials from Airflow Connection and returns storage_options
     compatible with Polars and s3fs.
@@ -32,19 +32,16 @@ def get_s3_storage_options(conn_id: str = "s3_default") -> dict:
             if endpoint_url:
                 options["client_kwargs"]["endpoint_url"] = endpoint_url
 
+            # Allow insecure connections if explicitly requested in extra (e.g., local MinIO)
             if conn.extra_dejson.get("secure") is False:
                 options["client_kwargs"]["use_ssl"] = False
                 options["client_kwargs"]["verify"] = False
 
         return options
     except Exception as e:
-        # Fallback for local testing if connection is not found
-        logger.warning(f"Failed to retrieve S3 connection '{conn_id}': {e}. Using defaults.")
-        return {
-            "key": "admin",
-            "secret": "password",
-            "client_kwargs": {"endpoint_url": "http://minio:9000"}
-        }
+        raise AirflowFailException(
+            f"CRITICAL: Failed to retrieve S3 connection '{conn_id}': {e}"
+        )
 
 
 def discover_available_partitions(
@@ -56,20 +53,20 @@ def discover_available_partitions(
     """
     Checks for the existence of parquet partitions for the given dataset and date.
     Returns a list of discovered partition paths.
+    Raises AirflowFailException on missing partitions to enforce SLA and pipeline integrity.
     """
     fs = s3fs.S3FileSystem(**s3_options)
     dataset_path = f"{base_path.rstrip('/')}/{dataset}"
 
     try:
-        # Expected: datalake/raw/wells/ (non-fact)
-        # Expected: datalake/raw/production/partition_date=2024-01-01/ (fact)
+        # Looking for Hive-style partitioned paths containing the execution date
+        search_pattern = f"{dataset_path}/*{execution_date}*/*.parquet"
+        files = fs.glob(search_pattern)
 
-        partition_path = f"{dataset_path}/partition_date={execution_date}"
-        if fs.exists(partition_path):
-             files = fs.glob(f"{partition_path}/*.parquet")
-        else:
-             # Try non-partitioned
-             files = fs.glob(f"{dataset_path}/*.parquet")
+        # Fallback to direct file naming if not strictly Hive-partitioned
+        if not files:
+            search_pattern = f"{dataset_path}/*{execution_date}*.parquet"
+            files = fs.glob(search_pattern)
 
     except Exception as e:
         raise AirflowFailException(
@@ -77,10 +74,16 @@ def discover_available_partitions(
         )
 
     if not files:
-        logger.warning(f"No partitions found for dataset '{dataset}' on date '{execution_date}'")
-        return []
+        raise AirflowFailException(
+            f"CRITICAL: Missing partitions for dataset '{dataset}' on execution date '{execution_date}'"
+        )
 
+    # Ensure fully qualified S3 paths
     valid_paths = [f"s3://{p}" if not p.startswith("s3://") else p for p in files]
+    logger.info(
+        f"Discovered {len(valid_paths)} partitions for {dataset} on {execution_date}."
+    )
+
     return valid_paths
 
 
@@ -88,7 +91,9 @@ def validate_file_integrity(
     dataset: str, partition_path: str, s3_options: dict
 ) -> DQResult:
     """
-    Validates physical file integrity.
+    Validates physical file integrity without loading the dataset into memory.
+    Checks existence, readability, and ensures the parquet file is not empty.
+    Raises AirflowFailException for critical corruptions.
     """
     fs = s3fs.S3FileSystem(**s3_options)
 
@@ -101,6 +106,11 @@ def validate_file_integrity(
         with fs.open(partition_path, "rb") as f:
             pf = pq.ParquetFile(f)
             num_rows = pf.metadata.num_rows
+
+            if num_rows == 0:
+                raise AirflowFailException(
+                    f"CRITICAL: Empty parquet file detected at {partition_path}"
+                )
 
         return DQResult(
             dataset=dataset,

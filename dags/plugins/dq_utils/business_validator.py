@@ -18,7 +18,6 @@ def validate_null_thresholds(
 ) -> DQResult:
     """
     Validates the maximum allowed percentage of NULL values per column.
-    Executes a single lazy aggregation query to prevent full dataset materialization.
     """
     total_rows_expr = pl.len().alias("total_rows")
     null_exprs = [
@@ -58,7 +57,7 @@ def validate_null_thresholds(
         dataset=dataset,
         validation_type="Null Thresholds",
         status=status,
-        failed_rows=0,  # Abstract metric for column-level checks
+        failed_rows=len(failed_checks),
         checked_rows=total_rows,
         message=message,
         created_at=datetime.utcnow(),
@@ -70,7 +69,6 @@ def validate_duplicate_keys(
 ) -> DQResult:
     """
     Validates uniqueness of primary/composite keys.
-    Uses lazy groupby and aggregation to minimize memory footprint.
     """
     dup_count_df = (
         lf.group_by(key_columns)
@@ -105,14 +103,10 @@ def validate_duplicate_keys(
 
 def validate_business_rules(lf: pl.LazyFrame, dataset: str) -> List[DQResult]:
     """
-    Validates domain-specific constraints (e.g., pressure > 0).
-    Reads rules from TABLE_CONTRACTS and executes them via lazy aggregations.
+    Validates domain-specific constraints.
     """
     contract = TABLE_CONTRACTS.get(dataset)
     if not contract:
-        logger.warning(
-            f"No contract found for dataset '{dataset}'. Skipping business rules."
-        )
         return []
 
     results = []
@@ -122,7 +116,8 @@ def validate_business_rules(lf: pl.LazyFrame, dataset: str) -> List[DQResult]:
         return []
 
     # 1. Validate Value Ranges
-    for col, (min_val, max_val) in contract.value_ranges.items():
+    for col, range_val in contract.value_ranges.items():
+        min_val, max_val = range_val
         exprs = []
         if min_val is not None:
             exprs.append(pl.col(col) < min_val)
