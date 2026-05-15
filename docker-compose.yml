@@ -7,15 +7,13 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
-  x-airflow-env: &airflow-env
-    MINIO_ROOT_USER: admin
-    MINIO_ROOT_PASSWORD: super_secret_minio_password
-    MINIO_ENDPOINT: http://minio:9000
-    MINIO_DEFAULT_BUCKET: datalake
-    AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB}
-    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+x-airflow-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB}
+  AIRFLOW_CONN_POSTGRES_DEFAULT: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+  AIRFLOW_CONN_AWS_DEFAULT: '{"conn_type": "aws", "login": "${MINIO_ROOT_USER}", "password": "${MINIO_ROOT_PASSWORD}", "extra": {"endpoint_url": "http://minio:9000"}}'
 
 x-airflow-common: &airflow-common
   build:
@@ -214,6 +212,18 @@ services:
       _AIRFLOW_WWW_USER_CREATE: 'true'
       _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME}
       _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD}
+
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PORT: 5432
+
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET}
+
     user: "0:0"
     depends_on:
       postgres:
