@@ -1,0 +1,274 @@
+# ==========================================
+# ЯКОРЯ (Anchors)
+# ==========================================
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-airflow-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${AIRFLOW_DB}
+  AIRFLOW_CONN_POSTGRES_DEFAULT: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+  AIRFLOW_CONN_AWS_DEFAULT: '{"conn_type": "aws", "login": "${MINIO_ROOT_USER}", "password": "${MINIO_ROOT_PASSWORD}", "extra": {"endpoint_url": "http://minio:9000"}}'
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  environment: *airflow-env
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+  networks:
+    - data_net
+  logging: *default-logging
+
+x-superset-common: &superset-common
+  image: apache/superset:3.1.0
+  environment:
+    SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+    SUPERSET_DB: ${SUPERSET_DB}
+    SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${SUPERSET_DB}
+    CACHE_CONFIG: '{"CACHE_TYPE": "RedisCache", "CACHE_DEFAULT_TIMEOUT": 300, "CACHE_KEY_PREFIX": "superset_", "CACHE_REDIS_URL": "redis://redis:6379/0"}'
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  networks:
+    - data_net
+  logging: *default-logging
+
+# ==========================================
+# СЕРВИСЫ
+# ==========================================
+services:
+  # 1. PostgreSQL
+  postgres:
+    image: postgres:15.6-alpine
+    container_name: pipeline_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-sql:/docker-entrypoint-initdb.d 
+    networks:
+      - data_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  postgres-init:
+    image: postgres:15.6-alpine
+    container_name: pipeline_postgres_init
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER} 
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        until psql -h postgres -U ${POSTGRES_USER} -d postgres -c 'SELECT 1' >/dev/null 2>&1; do
+          echo 'Waiting for postgres...'
+          sleep 1
+        done
+        psql -h postgres -U ${POSTGRES_USER} -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'airflow_db'" | grep -q 1 || psql -h postgres -U ${POSTGRES_USER} -d postgres -c "CREATE DATABASE airflow_db"
+        psql -h postgres -U ${POSTGRES_USER} -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'superset_db'" | grep -q 1 || psql -h postgres -U ${POSTGRES_USER} -d postgres -c "CREATE DATABASE superset_db"
+        echo 'Databases created (if missing)'
+        exit 0
+    networks:
+      - data_net
+
+  # 2. MinIO
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1
+    container_name: pipeline_minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - data_net
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  # 2.1 MinIO Init
+  minio-init:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1
+    container_name: pipeline_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - data_net
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+      mc mb myminio/${MINIO_DEFAULT_BUCKET} --ignore-existing;
+      mc anonymous set public myminio/${MINIO_DEFAULT_BUCKET};
+      exit 0;
+      "
+
+  # 3. Jupyter
+  jupyter:
+    image: jupyter/pyspark-notebook:python-3.11
+    container_name: pipeline_jupyter
+    restart: unless-stopped
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      MINIO_URL: "http://minio:9000"
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      PG_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+    volumes:
+      - ./work:/home/jovyan/work
+    networks:
+      - data_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    logging: *default-logging
+
+  # 4. Redis
+  redis:
+    image: redis:7.2-alpine
+    container_name: pipeline_redis
+    restart: unless-stopped
+    networks:
+      - data_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  # 5. Superset
+  superset:
+    <<: *superset-common
+    container_name: pipeline_superset
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    command: >
+      /bin/sh -c "gunicorn -w 2 --timeout 120 -b 0.0.0.0:8088 --limit-request-line 0 --limit-request-field_size 0 'superset.app:create_app()'"
+
+  # 5.1 Superset Init
+  superset-init:
+    <<: *superset-common
+    container_name: pipeline_superset_init
+    command: >
+      /bin/sh -c "
+      superset db upgrade &&
+      superset fab create-admin --username ${SUPERSET_ADMIN_USER} --firstname Superset --lastname Admin --email admin@example.com --password ${SUPERSET_ADMIN_PASSWORD} &&
+      superset init
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully 
+      redis:
+        condition: service_healthy
+
+  # 6. Airflow Init
+  airflow-init:
+    <<: *airflow-common
+    container_name: pipeline_airflow_init
+    command: version
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD}
+
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PORT: 5432
+
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET}
+
+    user: "0:0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
+
+  # 6.1 Airflow Webserver
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: pipeline_airflow_webserver
+    restart: always
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
+      airflow-init:
+        condition: service_completed_successfully
+
+  # 6.2 Airflow Scheduler
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: pipeline_airflow_scheduler
+    restart: always
+    command: scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
+      airflow-init:
+        condition: service_completed_successfully
+
+# ==========================================
+# СЕТИ И ВОЛЮМЫ
+# ==========================================
+networks:
+  data_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  minio_data:
+
