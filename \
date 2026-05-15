@@ -1,0 +1,12 @@
+Host github.com
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_ed25519
+    IdentitiesOnly yes
+
+Host verse
+    HostName gitverse.ru
+    User git
+    IdentityFile ~/.ssh/ed25519
+    IdentitiesOnly yes
+
