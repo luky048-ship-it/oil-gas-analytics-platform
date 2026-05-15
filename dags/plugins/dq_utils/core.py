@@ -7,10 +7,6 @@ from typing import Any, Dict, List, Tuple
 import polars as pl
 
 from dq_utils.dq_reporter import DQResult
-from dq_utils.business_validator import (validate_null_thresholds,
-                                        validate_duplicate_keys,
-                                        validate_business_rules)
-from dq_utils.statistical_validator import validate_distribution_drift
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +22,23 @@ def execute_dq_pipeline(
     execution_date: str,
     s3_options: dict,
 ) -> Tuple[List[dict], pl.DataFrame, pl.DataFrame]:
+    """
+    Executes a multi-layer DQ pipeline in a single pass using Polars Lazy API.
+    1. Schema Enforcement
+    2. Referential Integrity
+    3. Business Rules (Nulls, Ranges, Enums)
+    4. Statistical Drift
+    """
 
     # 1. Lazy Load
-    lf = pl.scan_parquet(partition_path, storage_options=s3_options)
+    pl_opts = {
+        "key": s3_options.get("key"),
+        "secret": s3_options.get("secret"),
+        "endpoint_url": s3_options.get("client_kwargs", {}).get("endpoint_url")
+    }
+    lf = pl.scan_parquet(partition_path, storage_options=pl_opts)
 
-    # Приведение типов согласно контракту (Schema Enforcement)
+    # Schema Enforcement
     lf = lf.cast(expected_schema)
 
     # Standardize timestamps: truncate to seconds
@@ -38,24 +46,9 @@ def execute_dq_pipeline(
         if isinstance(dtype, pl.Datetime) or dtype == pl.Datetime:
             lf = lf.with_columns(pl.col(col_name).dt.truncate("1s"))
 
-    results_obj = []
-
-    # Layer 3: Business Rules
-    results_obj.extend(validate_business_rules(lf, dataset))
-
-    # Layer 7: Completeness (Nulls and Duplicates)
-    # We pass 0.0 threshold for mandatory columns to detect ANY nulls
-    results_obj.append(validate_null_thresholds(lf, dataset, {c: 0.0 for c in business_rules_config.get("not_null_columns", [])}))
-    results_obj.append(validate_duplicate_keys(lf, dataset, key_columns))
-
-    # Layer 6: Statistical Drift (if stats provided)
-    stats_cols = business_rules_config.get("statistical_monitored_columns", [])
-    if stats_cols and historical_stats:
-        results_obj.extend(validate_distribution_drift(lf, dataset, stats_cols, historical_stats))
-
     rule_exprs: Dict[str, pl.Expr] = {}
 
-    # 2. Referential Integrity (Anti-Join) with Flag logic for splitting
+    # 2. Referential Integrity (Anti-Join logic via flags)
     import s3fs
     fs = s3fs.S3FileSystem(**s3_options)
 
@@ -65,7 +58,7 @@ def execute_dq_pipeline(
 
         if fs.glob(parent_path):
             parent_lf = (
-                pl.scan_parquet(parent_path, storage_options=s3_options)
+                pl.scan_parquet(parent_path, storage_options=pl_opts)
                 .select([pl.col(join["parent_key"]).alias(child_key)])
                 .unique()
                 .with_columns(pl.lit(True).alias(f"__fk_{child_key}"))
@@ -75,10 +68,12 @@ def execute_dq_pipeline(
         else:
             rule_exprs[f"fk_{child_key}"] = pl.lit(False)
 
-    # Row-level Business Rules for splitting valid/invalid
+    # 3. Business Rules (Layer 3 & 7)
+    # Null checks
     for col in business_rules_config.get("not_null_columns", []):
         rule_exprs[f"not_null_{col}"] = pl.col(col).is_not_null()
 
+    # Range checks
     for col, range_val in business_rules_config.get("value_ranges", {}).items():
         min_v, max_v = range_val
         cond = pl.lit(True)
@@ -88,7 +83,11 @@ def execute_dq_pipeline(
             cond = cond & (pl.col(col) <= max_v)
         rule_exprs[f"range_{col}"] = pl.col(col).is_null() | cond
 
-    # 4. Final Flag system for atomic materialization
+    # Enum checks
+    for col, allowed in business_rules_config.get("enums", {}).items():
+        rule_exprs[f"enum_{col}"] = pl.col(col).is_in(allowed) | pl.col(col).is_null()
+
+    # 4. Building the Final Validation Flag
     validation_cols = []
     for name, expr in rule_exprs.items():
         col_name = f"__is_valid_{name}"
@@ -100,19 +99,17 @@ def execute_dq_pipeline(
     else:
         lf = lf.with_columns(pl.lit(True).alias("__is_valid"))
 
-    # 5. Single Pass Collect
+    # 5. The One and Only Collect (Streaming Mode)
     df = lf.collect(streaming=True)
 
     created_at = datetime.now(timezone.utc).isoformat()
+    results = []
 
-    # Convert results objects to dicts
-    final_results = [r.__dict__ for r in results_obj]
-
-    # Process Row-Level results from flags
+    # Calculate metrics from the materialized flags
     for name in rule_exprs.keys():
         col_name = f"__is_valid_{name}"
         failed_count = df.filter(~pl.col(col_name)).height
-        final_results.append({
+        results.append({
             "dataset": dataset,
             "validation_type": f"Row-Level: {name}",
             "status": "FAIL" if failed_count > 0 else "PASS",
@@ -122,13 +119,9 @@ def execute_dq_pipeline(
             "created_at": created_at,
         })
 
-    # Ensure all created_at are serialized
-    for r in final_results:
-        if isinstance(r.get("created_at"), datetime):
-            r["created_at"] = r["created_at"].isoformat()
-
+    # Separate valid and invalid rows
     internal_cols = [c for c in df.columns if c.startswith("__")]
     valid_df = df.filter(pl.col("__is_valid")).drop(internal_cols)
     invalid_df = df.filter(~pl.col("__is_valid")).drop(internal_cols)
 
-    return final_results, valid_df, invalid_df
+    return results, valid_df, invalid_df

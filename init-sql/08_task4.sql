@@ -1,0 +1,45 @@
+INSERT INTO drivers (driver_id, name, experience_years, region) VALUES
+(1, 'Ivan Petrov', 8, 'Khanty-Mansi'),
+(2, 'Sergey Sidorov', 12, 'Tomsk'),
+(3, 'Aleksey Smirnov', 5, 'Tyumen'),
+(4, 'Pavel Egorov', 15, 'Perm'),
+(5, 'Andrey Kuznetsov', 10, 'Omsk');
+
+INSERT INTO vehicles (vehicle_id, plate_number, capacity_ton, fuel_type) VALUES
+(1, 'X123HM89', 40.0, 'diesel'),
+(2, 'K456TM70', 35.0, 'diesel'),
+(3, 'A789PO72', 25.0, 'gas'),
+(4, 'M234KE86', 30.0, 'diesel'),
+(5, 'E567TT55', 20.0, 'diesel');
+
+INSERT INTO deliveries (date, source, destination, product_type, volume_ton, cost_usd, delay_hours, distance_km, weather_conditions, driver_id, vehicle_id) VALUES
+('2025-10-01', 'Base-Khanty', 'Station-01', 'Diesel', 32.5, 2100.50, 0.0, 180.0, 'Clear', 1, 1),
+('2025-10-01', 'Base-Tomsk', 'Station-02', 'Gasoline', 28.0, 1850.00, 1.5, 150.0, 'Rain', 2, 2),
+('2025-10-01', 'Base-Tyumen', 'Station-03', 'Diesel', 22.0, 1650.25, 0.0, 120.0, 'Clear', 3, 3),
+('2025-10-02', 'Base-Khanty', 'Station-04', 'Kerosene', 35.0, 2400.80, 2.0, 210.0, 'Fog', 4, 1),
+('2025-10-02', 'Base-Tomsk', 'Station-05', 'Gasoline', 20.5, 1500.00, 0.5, 110.0, 'Cloudy', 5, 2),
+('2025-10-03', 'Base-Khanty', 'Station-06', 'Diesel', 33.2, 2200.75, 0.0, 185.0, 'Clear', 1, 1),
+('2025-10-03', 'Base-Tyumen', 'Station-07', 'Gasoline', 27.8, 1800.20, 3.0, 160.0, 'Rain', 3, 3),
+('2025-10-03', 'Base-Tomsk', 'Station-08', 'Diesel', 29.5, 1950.40, 1.0, 140.0, 'Clear', 2, 2),
+('2025-10-04', 'Base-Khanty', 'Station-09', 'Kerosene', 31.0, 2000.90, 0.0, 170.0, 'Clear', 4, 1),
+('2025-10-04', 'Base-Omsk', 'Station-10', 'Diesel', 25.0, 1750.60, 0.5, 130.0, 'Cloudy', 5, 5),
+('2025-10-05', 'Base-Khanty', 'Station-11', 'Diesel', 34.2, 2250.80, 1.0, 190.0, 'Rain', 1, 1),
+('2025-10-05', 'Base-Tomsk', 'Station-12', 'Gasoline', 26.8, 1850.00, 0.0, 155.0, 'Clear', 2, 2),
+('2025-10-06', 'Base-Tyumen', 'Station-13', 'Diesel', 23.5, 1680.90, 0.0, 125.0, 'Clear', 3, 3),
+('2025-10-06', 'Base-Omsk', 'Station-14', 'Kerosene', 18.0, 1400.40, 4.0, 100.0, 'Snow', 5, 5),
+('2025-10-07', 'Base-Khanty', 'Station-15', 'Diesel', 32.9, 2150.60, 0.0, 182.0, 'Clear', 4, 1),
+('2025-10-07', 'Base-Tomsk', 'Station-16', 'Gasoline', 27.0, 1780.00, 0.5, 150.0, 'Cloudy', 2, 2),
+('2025-10-08', 'Base-Tyumen', 'Station-17', 'Diesel', 21.8, 1620.20, 0.0, 118.0, 'Clear', 3, 3),
+('2025-10-08', 'Base-Omsk', 'Station-18', 'Kerosene', 19.2, 1420.00, 2.5, 105.0, 'Rain', 5, 5),
+('2025-10-09', 'Base-Khanty', 'Station-19', 'Diesel', 33.5, 2180.40, 0.0, 186.0, 'Clear', 1, 1),
+('2025-10-09', 'Base-Tomsk', 'Station-20', 'Gasoline', 28.4, 1820.00, 1.0, 152.0, 'Fog', 2, 2),
+('2025-10-10', 'Base-Tyumen', 'Station-21', 'Diesel', 22.6, 1660.00, 0.0, 122.0, 'Clear', 3, 3),
+('2025-10-10', 'Base-Omsk', 'Station-22', 'Kerosene', 20.0, 1450.00, 3.0, 108.0, 'Snow', 5, 5),
+('2025-10-11', 'Base-Khanty', 'Station-23', 'Diesel', 31.8, 2100.00, 0.5, 175.0, 'Clear', 4, 1),
+('2025-10-11', 'Base-Tomsk', 'Station-24', 'Gasoline', 26.5, 1800.00, 0.0, 149.0, 'Cloudy', 2, 2),
+('2025-10-12', 'Base-Tyumen', 'Station-25', 'Diesel', 24.3, 1700.00, 0.0, 126.0, 'Clear', 3, 3),
+('2025-10-12', 'Base-Omsk', 'Station-26', 'Kerosene', 18.9, 1430.00, 2.0, 104.0, 'Rain', 5, 5),
+('2025-10-13', 'Base-Khanty', 'Station-27', 'Diesel', 35.0, 2300.00, 0.0, 200.0, 'Clear', 1, 1),
+('2025-10-13', 'Base-Tomsk', 'Station-28', 'Gasoline', 29.0, 1880.00, 1.5, 157.0, 'Fog', 2, 2),
+('2025-10-14', 'Base-Tyumen', 'Station-29', 'Diesel', 23.1, 1680.00, 0.0, 124.0, 'Clear', 3, 3),
+('2025-10-14', 'Base-Omsk', 'Station-30', 'Kerosene', 19.5, 1450.00, 3.5, 109.0, 'Snow', 5, 5);

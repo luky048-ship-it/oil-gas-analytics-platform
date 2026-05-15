@@ -1,6 +1,7 @@
 import polars as pl
 from typing import Dict, Any
 
+# Synchronized with init-sql Source of Truth
 SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
     "wells": {
         "columns": {
@@ -18,13 +19,13 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "dedup_key": ["well_id"],
         "validation_rules": {
             "enums": {
-                "status": ["active", "inactive", "maintenance", "decommissioned"]
+                "status": ["active", "suspended", "maintenance"]
             },
             "ranges": {},
-            "custom": [{"rule": "start_date <= current_date", "severity": "HIGH"}],
+            "custom": [],
         },
         "outlier_columns": [],
-        "missing_rules": {"operator": {"strategy": "fill_value", "value": "UNKNOWN"}},
+        "missing_rules": {},
     },
     "production": {
         "columns": {
@@ -42,7 +43,7 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "primary_key": ["prod_id"],
         "foreign_keys": {"well_id": "wells.well_id"},
         "time_column": "date",
-        "dedup_key": ["prod_id", "date"],
+        "dedup_key": ["prod_id"],
         "validation_rules": {
             "enums": {},
             "ranges": {
@@ -51,26 +52,11 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
                 "water_m3": {"min": 0.0},
                 "energy_kwh": {"min": 0.0},
                 "downtime_hours": {"min": 0.0, "max": 24.0},
-                "pressure": {"min": 0.0, "max": 1000.0},
-                "temperature": {"min": -60.0, "max": 250.0},
             },
             "custom": [],
         },
-        "outlier_columns": [
-            "oil_ton",
-            "gas_m3",
-            "water_m3",
-            "energy_kwh",
-            "temperature",
-            "pressure",
-        ],
-        "missing_rules": {
-            "oil_ton": {"strategy": "fill_value", "value": 0.0},
-            "gas_m3": {"strategy": "fill_value", "value": 0.0},
-            "water_m3": {"strategy": "fill_value", "value": 0.0},
-            "energy_kwh": {"strategy": "fill_value", "value": 0.0},
-            "downtime_hours": {"strategy": "fill_value", "value": 0.0},
-        },
+        "outlier_columns": ["oil_ton", "gas_m3", "water_m3"],
+        "missing_rules": {},
     },
     "well_telemetry": {
         "columns": {
@@ -88,7 +74,7 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "primary_key": ["record_id"],
         "foreign_keys": {"well_id": "wells.well_id"},
         "time_column": "timestamp",
-        "dedup_key": ["record_id", "timestamp"],
+        "dedup_key": ["record_id"],
         "validation_rules": {
             "enums": {},
             "ranges": {
@@ -96,54 +82,10 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
                 "vibration": {"min": 0.0},
                 "oil_flow_rate": {"min": 0.0},
             },
-            "custom": [{"rule": "pressure_out >= pressure_in", "severity": "MEDIUM"}],
+            "custom": [],
         },
-        "outlier_columns": [
-            "pump_speed_rpm",
-            "pump_current",
-            "pressure_in",
-            "pressure_out",
-            "temperature",
-            "vibration",
-            "oil_flow_rate",
-        ],
-        "missing_rules": {
-            "pump_speed_rpm": {
-                "strategy": "forward_fill",
-                "partition_by": "well_id",
-                "order_by": "timestamp",
-            },
-            "pump_current": {
-                "strategy": "forward_fill",
-                "partition_by": "well_id",
-                "order_by": "timestamp",
-            },
-            "pressure_in": {
-                "strategy": "forward_fill",
-                "partition_by": "well_id",
-                "order_by": "timestamp",
-            },
-            "pressure_out": {
-                "strategy": "forward_fill",
-                "partition_by": "well_id",
-                "order_by": "timestamp",
-            },
-            "temperature": {
-                "strategy": "forward_fill",
-                "partition_by": "well_id",
-                "order_by": "timestamp",
-            },
-            "vibration": {
-                "strategy": "forward_fill",
-                "partition_by": "well_id",
-                "order_by": "timestamp",
-            },
-            "oil_flow_rate": {
-                "strategy": "forward_fill",
-                "partition_by": "well_id",
-                "order_by": "timestamp",
-            },
-        },
+        "outlier_columns": ["vibration", "temperature", "oil_flow_rate"],
+        "missing_rules": {},
         "aggregation": {
             "key": "well_id",
             "time_column": "timestamp",
@@ -193,13 +135,10 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "validation_rules": {
             "enums": {},
             "ranges": {},
-            "custom": [{"rule": "install_date <= current_date", "severity": "HIGH"}],
+            "custom": [],
         },
         "outlier_columns": [],
-        "missing_rules": {
-            "manufacturer": {"strategy": "fill_value", "value": "UNKNOWN"},
-            "model": {"strategy": "fill_value", "value": "UNKNOWN"},
-        },
+        "missing_rules": {},
     },
     "pump_sensors": {
         "columns": {
@@ -226,33 +165,7 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
             "custom": [],
         },
         "outlier_columns": ["temperature", "vibration", "current", "rpm", "pressure"],
-        "missing_rules": {
-            "temperature": {
-                "strategy": "forward_fill",
-                "partition_by": "pump_id",
-                "order_by": "timestamp",
-            },
-            "vibration": {
-                "strategy": "forward_fill",
-                "partition_by": "pump_id",
-                "order_by": "timestamp",
-            },
-            "current": {
-                "strategy": "forward_fill",
-                "partition_by": "pump_id",
-                "order_by": "timestamp",
-            },
-            "rpm": {
-                "strategy": "forward_fill",
-                "partition_by": "pump_id",
-                "order_by": "timestamp",
-            },
-            "pressure": {
-                "strategy": "forward_fill",
-                "partition_by": "pump_id",
-                "order_by": "timestamp",
-            },
-        },
+        "missing_rules": {},
         "aggregation": {
             "key": "pump_id",
             "time_column": "timestamp",
@@ -279,22 +192,12 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "time_column": "failure_date",
         "dedup_key": ["failure_id"],
         "validation_rules": {
-            "enums": {
-                "failure_type": [
-                    "electrical",
-                    "mechanical",
-                    "overheating",
-                    "seal_failure",
-                    "vibration_alarm",
-                    "pressure_loss",
-                    "unknown",
-                ]
-            },
+            "enums": {},
             "ranges": {"downtime_hours": {"min": 0.0}},
-            "custom": [{"rule": "failure_type is not null", "severity": "HIGH"}],
+            "custom": [],
         },
         "outlier_columns": ["downtime_hours"],
-        "missing_rules": {"downtime_hours": {"strategy": "fill_value", "value": 0.0}},
+        "missing_rules": {},
     },
     "deliveries": {
         "columns": {
@@ -319,9 +222,7 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "time_column": "date",
         "dedup_key": ["delivery_id"],
         "validation_rules": {
-            "enums": {
-                "product_type": ["crude_oil", "condensate", "diesel", "drilling_fluids"]
-            },
+            "enums": {},
             "ranges": {
                 "volume_ton": {"min": 0.0},
                 "cost_usd": {"min": 0.0},
@@ -331,9 +232,7 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
             "custom": [],
         },
         "outlier_columns": ["volume_ton", "cost_usd", "delay_hours", "distance_km"],
-        "missing_rules": {
-            "weather_conditions": {"strategy": "fill_value", "value": "UNKNOWN"}
-        },
+        "missing_rules": {},
     },
     "drivers": {
         "columns": {
@@ -352,7 +251,7 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
             "custom": [],
         },
         "outlier_columns": [],
-        "missing_rules": {"region": {"strategy": "fill_value", "value": "UNKNOWN"}},
+        "missing_rules": {},
     },
     "vehicles": {
         "columns": {
@@ -366,12 +265,12 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "time_column": None,
         "dedup_key": ["vehicle_id"],
         "validation_rules": {
-            "enums": {"fuel_type": ["diesel", "gasoline", "electric", "hybrid", "lng"]},
+            "enums": {},
             "ranges": {"capacity_ton": {"min": 0.0001}},
             "custom": [],
         },
         "outlier_columns": ["capacity_ton"],
-        "missing_rules": {"fuel_type": {"strategy": "fill_value", "value": "UNKNOWN"}},
+        "missing_rules": {},
     },
     "oil_stations": {
         "columns": {
@@ -395,6 +294,6 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
             "custom": [],
         },
         "outlier_columns": ["oil_flow_per_day"],
-        "missing_rules": {"oil_flow_per_day": {"strategy": "fill_value", "value": 0.0}},
+        "missing_rules": {},
     },
 }

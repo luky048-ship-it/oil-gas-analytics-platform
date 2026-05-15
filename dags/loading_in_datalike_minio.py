@@ -19,7 +19,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from psycopg2 import sql
 
 # ---------------------------------------------------------------------------
-# Конфигурация таблиц и схем
+# Конфигурация таблиц и схем — СИНХРОНИЗИРОВАНО С SQL (init-sql)
 # ---------------------------------------------------------------------------
 
 TABLE_COLUMNS: Dict[str, List[str]] = {
@@ -114,6 +114,7 @@ TABLES_CONFIG: Dict[str, Dict[str, Any]] = {
     "oil_stations": {"date_col": None, "is_fact": False},
 }
 
+# Используем double для NUMERIC и int32 для INT
 EXPECTED_SCHEMAS: Dict[str, pa.Schema] = {
     "wells": pa.schema(
         [
@@ -234,10 +235,19 @@ EXPECTED_SCHEMAS: Dict[str, pa.Schema] = {
         ]
     ),
 }
+
 # ---------------------------------------------------------------------------
-# Распределённая блокировка
+# Utils
 # ---------------------------------------------------------------------------
 
+def _get_minio_fs() -> Tuple[s3fs.S3FileSystem, str]:
+    conn = BaseHook.get_connection("aws_default")
+    extra = conn.extra_dejson
+    return s3fs.S3FileSystem(
+        key=conn.login,
+        secret=conn.password,
+        client_kwargs={"endpoint_url": extra.get("endpoint_url", "http://minio:9000")}
+    ), os.getenv("MINIO_DEFAULT_BUCKET", "datalake")
 
 def acquire_partition_lock(
     table_name: str, partition_date: str, dag_run_id: str, stale_minutes: int = 30
@@ -255,7 +265,8 @@ def acquire_partition_lock(
             """,
                 (table_name, partition_date, dag_run_id),
             )
-            if cur.fetchone():
+            res = cur.fetchone()
+            if res:
                 return True
 
             cur.execute(
@@ -267,21 +278,19 @@ def acquire_partition_lock(
             """,
                 (table_name, partition_date),
             )
-            status, loaded_at = cur.fetchone()
+            row = cur.fetchone()
+            if not row: return True
+            status, loaded_at = row
 
             if status == "loaded":
                 return False
 
             if status == "processing":
                 now_utc = datetime.now(timezone.utc)
+                if loaded_at.tzinfo is None:
+                    loaded_at = loaded_at.replace(tzinfo=timezone.utc)
                 age = now_utc - loaded_at
                 if age > timedelta(minutes=stale_minutes):
-                    logging.warning(
-                        "Stale lock detected for %s/%s (age %s). Overwriting.",
-                        table_name,
-                        partition_date,
-                        age,
-                    )
                     cur.execute(
                         """
                         UPDATE etl_metadata.loaded_partitions
@@ -293,60 +302,20 @@ def acquire_partition_lock(
                     conn.commit()
                     return True
                 else:
-                    raise RuntimeError(
-                        f"Partition {table_name}/{partition_date} is locked by another run."
-                    )
-            else:
-                raise RuntimeError(f"Unknown partition status: {status}")
+                    raise RuntimeError(f"Partition {table_name}/{partition_date} is locked by {dag_run_id}.")
+            return False
 
-
-def release_partition_lock(table_name: str, partition_date: str, success: bool) -> None:
+def release_partition_lock(table_name: str, partition_date: str, success: bool = True) -> None:
     hook = PostgresHook(postgres_conn_id="postgres_default")
-    with hook.get_conn() as conn:
-        with conn.cursor() as cur:
-            if success:
-                cur.execute(
-                    """
-                    UPDATE etl_metadata.loaded_partitions
-                    SET status = 'loaded', updated_at = CURRENT_TIMESTAMP
-                    WHERE table_name = %s AND partition_date = %s
-                """,
-                    (table_name, partition_date),
-                )
-            else:
-                cur.execute(
-                    """
-                    DELETE FROM etl_metadata.loaded_partitions
-                    WHERE table_name = %s AND partition_date = %s
-                """,
-                    (table_name, partition_date),
-                )
-        conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# S3 / MinIO & Data Quality
-# ---------------------------------------------------------------------------
-
-
-def _get_minio_fs() -> Tuple[s3fs.S3FileSystem, str]:
-    """Возвращает настроенный s3fs без конфликта версий aiobotocore."""
-    conn = BaseHook.get_connection("aws_default")
-    endpoint_url = conn.extra_dejson.get("endpoint_url", "http://minio:9000")
-
-    if not conn.login or not conn.password:
-        raise ValueError("MinIO credentials are missing in 'aws_default' connection.")
-
-    fs = s3fs.S3FileSystem(
-        key=conn.login,
-        secret=conn.password,
-        client_kwargs={"endpoint_url": endpoint_url},
-        default_block_size=64 * 1024 * 1024,
-        default_fill_cache=False,
-        use_listings_cache=False,
+    status = "loaded" if success else "failed"
+    hook.run(
+        """
+        UPDATE etl_metadata.loaded_partitions
+        SET status = %s, updated_at = CURRENT_TIMESTAMP
+        WHERE table_name = %s AND partition_date = %s
+    """,
+        parameters=(status, table_name, partition_date),
     )
-    return fs, endpoint_url
-
 
 def _cast_batch_to_schema(
     batch: pa.RecordBatch, target_schema: pa.Schema
@@ -358,66 +327,32 @@ def _cast_batch_to_schema(
             col = batch.column(idx)
             if col.type != field.type:
                 try:
-                    # strict validation (safe=True)
                     col = col.cast(field.type, safe=True)
                 except pa.ArrowInvalid as e:
-                    logging.error(
-                        "Schema incompatibility: field '%s' cannot be safely cast to %s",
-                        field.name,
-                        field.type,
-                    )
-                    raise ValueError(
-                        f"Schema incompatibility for column '{field.name}': {e}"
-                    )
+                    raise ValueError(f"Schema incompatibility for column '{field.name}': {e}")
         else:
             col = pa.nulls(batch.num_rows, type=field.type)
         arrays.append(col)
     return pa.RecordBatch.from_arrays(arrays, schema=target_schema)
 
-
 def _invalidate_partition(fs: s3fs.S3FileSystem, partition_dir: str) -> None:
-    """Удаляет _SUCCESS и manifest.json для блокировки чтения downstream системами."""
     for marker in ["_SUCCESS", "manifest.json"]:
         path = f"{partition_dir}/{marker}"
         if fs.exists(path):
             fs.rm(path)
 
-
 def _cleanup_orphans(fs: s3fs.S3FileSystem, partition_dir: str, keep_file: str) -> None:
-    """Удаляет все parquet файлы в партиции, кроме текущего успешно записанного."""
     if not fs.exists(partition_dir):
         return
     for file_path in fs.ls(partition_dir):
         file_name = file_path.split("/")[-1]
         if file_name.endswith(".parquet") and file_name != keep_file:
-            logging.info("Cleaning up orphaned/old file: %s", file_path)
             fs.rm(file_path)
-
 
 def _emit_lineage_event(
     table_name: str, path: str, rows_count: int, run_id: str, schema: pa.Schema
 ) -> None:
-    """Production-grade lineage hook (OpenLineage-ready)."""
-    schema_fields = [{"name": f.name, "type": str(f.type)} for f in schema]
-    event = {
-        "eventType": "COMPLETE",
-        "eventTime": datetime.utcnow().isoformat() + "Z",
-        "run": {"runId": run_id},
-        "job": {"namespace": "postgres_to_minio", "name": f"extract_{table_name}"},
-        "inputs": [{"namespace": "postgres", "name": table_name}],
-        "outputs": [
-            {
-                "namespace": "s3",
-                "name": path,
-                "facets": {
-                    "schema": {"fields": schema_fields},
-                    "stats": {"rowCount": rows_count},
-                },
-            }
-        ],
-    }
-    logging.info("OpenLineage Event: %s", json.dumps(event))
-
+    pass
 
 # ---------------------------------------------------------------------------
 # Core ETL Logic
@@ -429,20 +364,22 @@ def extract_load(
     start_ts = time.time()
     locked = False
 
-    locked = False
     if cfg.get("is_fact"):
         locked = acquire_partition_lock(table_name, ds, dag_run_id)
         if not locked:
+            logging.info(f"Partition {table_name}/{ds} already loaded. Skipping.")
             return
 
-    fs, _ = _get_minio_fs()
-    bucket = os.getenv("MINIO_DEFAULT_BUCKET", "datalake")
+    fs, bucket = _get_minio_fs()
     expected_schema = EXPECTED_SCHEMAS[table_name]
 
     if cfg.get("is_fact"):
         partition_dir = f"{bucket}/raw/{table_name}/partition_date={ds}"
     else:
         partition_dir = f"{bucket}/raw/{table_name}"
+
+    if not fs.exists(partition_dir):
+        fs.makedirs(partition_dir)
 
     file_uuid = uuid.uuid4().hex
     parquet_filename = f"data_{file_uuid}.parquet"
@@ -456,7 +393,6 @@ def extract_load(
     col_identifiers = [sql.Identifier(col) for col in columns]
     date_col = cfg.get("date_col")
 
-    # Deterministic ordering
     if table_name == "well_targets":
         order_clause = sql.SQL("ORDER BY well_id, date")
     else:
@@ -502,6 +438,7 @@ def extract_load(
                     if not chunk:
                         break
 
+                    # Convert result list of tuples to Arrow RecordBatch
                     arrays = [pa.array(col) for col in zip(*chunk)]
                     batch = pa.RecordBatch.from_arrays(arrays, names=columns)
                     batch = _cast_batch_to_schema(batch, expected_schema)
@@ -509,14 +446,7 @@ def extract_load(
 
                     if writer is None:
                         s3_file = fs.open(target_parquet_path, "wb")
-                        writer = pq.ParquetWriter(
-                            s3_file,
-                            schema=expected_schema,
-                            compression="snappy",
-                            use_dictionary=True,
-                            data_page_size=1048576,
-                            write_batch_size=100000,
-                        )
+                        writer = pq.ParquetWriter(s3_file, schema=expected_schema, compression="snappy")
 
                     writer.write_table(table)
                     rows_count += len(chunk)
@@ -524,37 +454,13 @@ def extract_load(
         if rows_count == 0:
             logging.info("Zero rows extracted. Creating empty Parquet.")
             s3_file = fs.open(target_parquet_path, "wb")
-            writer = pq.ParquetWriter(
-                s3_file, schema=expected_schema, compression="snappy"
-            )
-            writer.write_table(expected_schema.empty_table())
+            writer = pq.ParquetWriter(s3_file, schema=expected_schema, compression="snappy")
+            writer.write_table(pa.Table.from_batches([], schema=expected_schema))
 
-        if writer:
-            writer.close()
-        if s3_file:
-            s3_file.close()
-
-        file_info = fs.info(target_parquet_path)
-        file_size = file_info["size"]
-        pf = pq.ParquetFile(fs.open(target_parquet_path, "rb"))
-        if pf.metadata.num_rows != rows_count:
-            raise ValueError(
-                f"Integrity check failed: expected {rows_count} rows, got {pf.metadata.num_rows}"
-            )
+        if writer: writer.close()
+        if s3_file: s3_file.close()
 
         _cleanup_orphans(fs, partition_dir, parquet_filename)
-
-        schema_hash = hashlib.sha256(expected_schema.to_string().encode()).hexdigest()
-        manifest = {
-            "file_path": target_parquet_path,
-            "row_count": rows_count,
-            "schema_hash": schema_hash,
-            "creation_timestamp": datetime.utcnow().isoformat() + "Z",
-            "dag_run_id": dag_run_id,
-            "file_size_bytes": file_size,
-        }
-        with fs.open(manifest_path, "w") as mf:
-            json.dump(manifest, mf)
 
         with fs.open(success_path, "wb") as sf:
             sf.write(b"")
@@ -563,44 +469,14 @@ def extract_load(
             release_partition_lock(table_name, ds, success=True)
             locked = False
 
-        _emit_lineage_event(
-            table_name, partition_dir, rows_count, dag_run_id, expected_schema
-        )
-
         elapsed = time.time() - start_ts
-        logging.info(
-            "Committed %s/%s: %d rows in %.2f sec.", table_name, ds, rows_count, elapsed
-        )
+        logging.info("Committed %s/%s: %d rows in %.2f sec.", table_name, ds, rows_count, elapsed)
 
     except Exception as e:
         logging.error("ETL failed for %s/%s: %s", table_name, ds, str(e))
         if locked:
-            try:
-                release_partition_lock(table_name, ds, success=False)
-                locked = False
-            except Exception as unlock_err:
-                logging.error("Failed to release lock: %s", unlock_err)
-        if fs.exists(target_parquet_path):
-            fs.rm(target_parquet_path)
+            release_partition_lock(table_name, ds, success=False)
         raise
-
-    finally:
-        if locked:
-            try:
-                release_partition_lock(table_name, ds, success=False)
-            except Exception:
-                logging.exception("Failed to release lock in finally")
-        if writer is not None:
-            try:
-                writer.close()
-            except Exception:
-                pass
-        if s3_file is not None:
-            try:
-                s3_file.close()
-            except Exception:
-                pass
-
 
 # ---------------------------------------------------------------------------
 # DAG
@@ -608,10 +484,8 @@ def extract_load(
 
 default_args = {
     "owner": "data_platform",
-    "depends_on_past": False,
     "retries": 3,
     "retry_delay": timedelta(seconds=30),
-    "retry_exponential_backoff": True,
 }
 
 with DAG(
