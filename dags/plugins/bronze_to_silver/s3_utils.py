@@ -1,30 +1,41 @@
 # plugins/bronze_to_silver/s3_utils.py
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+import logging
 
 import polars as pl
 from airflow.hooks.base import BaseHook
 
+logger = logging.getLogger(__name__)
 
-def get_s3_storage_options(conn_id: str = "s3_datalake") -> Dict[str, Any]:
+def get_s3_storage_options(conn_id: str = "aws_default") -> Dict[str, Any]:
     """
     Fetches S3 credentials from Airflow Connection and formats them
     for Polars and PyArrow storage_options.
     """
-    conn = BaseHook.get_connection(conn_id)
-    extra = conn.extra_dejson
+    try:
+        conn = BaseHook.get_connection(conn_id)
+        extra = conn.extra_dejson
 
-    options = {
-        "aws_access_key_id": conn.login,
-        "aws_secret_access_key": conn.password,
-    }
+        options = {
+            "aws_access_key_id": conn.login,
+            "aws_secret_access_key": conn.password,
+        }
 
-    if extra.get("endpoint_url"):
-        options["aws_endpoint_url"] = extra.get("endpoint_url")
-    if extra.get("region_name"):
-        options["aws_region"] = extra.get("region_name")
+        if extra.get("endpoint_url"):
+            options["aws_endpoint_url"] = extra.get("endpoint_url")
+        if extra.get("region_name"):
+            options["aws_region"] = extra.get("region_name")
 
-    return options
+        return options
+    except Exception as e:
+        logger.warning(f"Connection {conn_id} not found: {e}. Using defaults for MinIO.")
+        return {
+            "aws_access_key_id": "admin",
+            "aws_secret_access_key": "password",
+            "aws_endpoint_url": "http://minio:9000",
+            "aws_region": "us-east-1"
+        }
 
 
 def load_bronze_dataset(
@@ -35,14 +46,21 @@ def load_bronze_dataset(
 ) -> pl.LazyFrame:
     """
     Lazily loads parquet files from Bronze layer.
-    Applies automatic predicate pushdown for the event time column based on watermark.
     """
     if not dataset_paths:
         return pl.LazyFrame()
 
+    # Normalize storage options for polars
+    pl_options = {
+        "key": storage_options.get("aws_access_key_id"),
+        "secret": storage_options.get("aws_secret_access_key"),
+        "endpoint_url": storage_options.get("aws_endpoint_url"),
+        "region": storage_options.get("aws_region")
+    }
+
     lf = pl.scan_parquet(
         dataset_paths,
-        storage_options=storage_options,
+        storage_options=pl_options,
         hive_partitioning=True,
     )
 

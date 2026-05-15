@@ -29,6 +29,11 @@ def execute_dq_pipeline(
     # Приведение типов согласно контракту (Schema Enforcement)
     lf = lf.cast(expected_schema)
 
+    # Standardize timestamps: truncate to seconds as per contract requirement
+    for col_name, dtype in expected_schema.items():
+        if isinstance(dtype, pl.Datetime) or dtype == pl.Datetime:
+            lf = lf.with_columns(pl.col(col_name).dt.truncate("1s"))
+
     rule_exprs: Dict[str, pl.Expr] = {}
 
     # 2. Referential Integrity (Anti-Join) с проверкой на существование файлов

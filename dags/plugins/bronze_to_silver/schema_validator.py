@@ -16,7 +16,7 @@ def validate_dataset_schema(
     Fails the pipeline if mandatory columns are missing or types are strictly incompatible.
     Logs warnings for new unexpected columns (schema drift).
     """
-    actual_schema = lf.collect_schema()
+    actual_schema = lf.schema
 
     missing_columns = []
     type_mismatches = []

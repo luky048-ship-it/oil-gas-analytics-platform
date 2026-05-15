@@ -12,9 +12,12 @@ def write_silver_dataset(
     lf: pl.LazyFrame,
     dataset: str,
     partition_date: str,
+    storage_options: Dict[str, Any] = None,
     silver_base: str = "s3://datalake/silver",
 ) -> str:
-    storage_options = get_s3_storage_options()
+    if storage_options is None:
+        storage_options = get_s3_storage_options()
+
     lf_partitioned = lf.with_columns(pl.lit(partition_date).alias("partition_date"))
 
     s3_fs = fs.S3FileSystem(
