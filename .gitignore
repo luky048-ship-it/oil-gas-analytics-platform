@@ -28,8 +28,6 @@ build/
 # PostgreSQL data
 postgres-data/
 pgdata/
-*.sql
-!docker-entrypoint-initdb.d/*.sql  
 
 # MinIO data
 minio-data/
