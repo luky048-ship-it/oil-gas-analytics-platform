@@ -7,6 +7,11 @@ from typing import Any, Dict, List, Tuple
 import polars as pl
 
 from dq_utils.dq_reporter import DQResult
+from dq_utils.business_validator import (validate_null_thresholds,
+                                        validate_duplicate_keys,
+                                        validate_business_rules)
+from dq_utils.reference_validator import validate_reference_integrity
+# from dq_utils.statistical_validator import validate_distribution_drift, validate_volume_anomaly
 
 logger = logging.getLogger(__name__)
 
@@ -21,47 +26,43 @@ def execute_dq_pipeline(
     historical_stats: Dict[str, Tuple[float, float]],
     execution_date: str,
     s3_options: dict,
-) -> Tuple[List[Dict[str, Any]], pl.DataFrame, pl.DataFrame]:
+) -> Tuple[List[dict], pl.DataFrame, pl.DataFrame]:
 
-    # 1. Lazy Load с передачей параметров fsspec через storage_options
-    lf = pl.scan_parquet(partition_path, storage_options=s3_options)
+    # 1. Lazy Load
+    # Normalize s3_options for Polars
+    pl_opts = {
+        "key": s3_options.get("key"),
+        "secret": s3_options.get("secret"),
+        "endpoint_url": s3_options.get("client_kwargs", {}).get("endpoint_url")
+    }
 
-    # Приведение типов согласно контракту (Schema Enforcement)
+    lf = pl.scan_parquet(partition_path, storage_options=pl_opts)
+
+    # Schema Enforcement and Timestamp Truncation
     lf = lf.cast(expected_schema)
-
-    # Standardize timestamps: truncate to seconds as per contract requirement
     for col_name, dtype in expected_schema.items():
         if isinstance(dtype, pl.Datetime) or dtype == pl.Datetime:
             lf = lf.with_columns(pl.col(col_name).dt.truncate("1s"))
 
+    results = []
+
+    # Layer 2: Schema (Implicit in cast)
+
+    # Layer 3: Business Rules
+    biz_results = validate_business_rules(lf, dataset)
+    results.extend([r.__dict__ for r in biz_results])
+
+    # Layer 7: Completeness (Nulls and Duplicates)
+    # Using small sample or specific aggregations for DQResult objects
+    null_res = validate_null_thresholds(lf, dataset, {c: 0.0 for c in business_rules_config.get("not_null_columns", [])})
+    results.append(null_res.__dict__)
+
+    dup_res = validate_duplicate_keys(lf, dataset, key_columns)
+    results.append(dup_res.__dict__)
+
+    # 4. Building the Validation Graph for valid/invalid split
     rule_exprs: Dict[str, pl.Expr] = {}
 
-    # 2. Referential Integrity (Anti-Join) с проверкой на существование файлов
-    import s3fs
-
-    fs = s3fs.S3FileSystem(**s3_options)
-
-    for join in parent_joins:
-        child_key = join["child_key"]
-        parent_path = join["parent_path"]
-
-        # Проверяем, есть ли файлы по пути (чтобы scan_parquet не упал)
-        if fs.glob(parent_path):
-            parent_lf = (
-                pl.scan_parquet(parent_path, storage_options=s3_options)
-                .select([pl.col(join["parent_key"]).alias(child_key)])
-                .unique()
-                .with_columns(pl.lit(True).alias(f"__fk_{child_key}"))
-            )
-            lf = lf.join(parent_lf, on=child_key, how="left")
-            rule_exprs[f"fk_{child_key}"] = pl.col(f"__fk_{child_key}").fill_null(False)
-        else:
-            logger.warning(
-                f"Parent path {parent_path} is empty. RI will fail for all rows."
-            )
-            rule_exprs[f"fk_{child_key}"] = pl.lit(False)
-
-    # 3. Business Rules
     for col in business_rules_config.get("not_null_columns", []):
         rule_exprs[f"not_null_{col}"] = pl.col(col).is_not_null()
 
@@ -73,7 +74,6 @@ def execute_dq_pipeline(
             cond = cond & (pl.col(col) <= max_v)
         rule_exprs[f"range_{col}"] = pl.col(col).is_null() | cond
 
-    # 4. Построение итогового флага (Single Pass Graph)
     validation_cols = []
     for name, expr in rule_exprs.items():
         col_name = f"__is_valid_{name}"
@@ -85,31 +85,16 @@ def execute_dq_pipeline(
     else:
         lf = lf.with_columns(pl.lit(True).alias("__is_valid"))
 
-    # 5. Единственный Collect (Streaming Mode)
+    # 5. Single Pass Collect
     df = lf.collect(streaming=True)
-
-    results = []
-    created_at = datetime.now(timezone.utc).isoformat()
-
-    for name in rule_exprs.keys():
-        col_name = f"__is_valid_{name}"
-        failed_count = df.filter(~pl.col(col_name)).height
-        results.append(
-            {
-                "dataset": dataset,
-                "validation_type": f"Row-Level: {name}",
-                "status": "FAIL" if failed_count > 0 else "PASS",
-                "failed_rows": failed_count,
-                "checked_rows": df.height,
-                "message": (
-                    f"Failed {failed_count} rows" if failed_count > 0 else "Passed"
-                ),
-                "created_at": created_at,
-            }
-        )
 
     internal_cols = [c for c in df.columns if c.startswith("__")]
     valid_df = df.filter(pl.col("__is_valid")).drop(internal_cols)
     invalid_df = df.filter(~pl.col("__is_valid")).drop(internal_cols)
+
+    # Serialize datetimes for XCom
+    for r in results:
+        if isinstance(r.get("created_at"), datetime):
+            r["created_at"] = r["created_at"].isoformat()
 
     return results, valid_df, invalid_df

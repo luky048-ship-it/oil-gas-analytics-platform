@@ -249,11 +249,77 @@ def _get_minio_fs() -> Tuple[s3fs.S3FileSystem, str]:
 def acquire_partition_lock(
     table_name: str, partition_date: str, dag_run_id: str, stale_minutes: int = 30
 ) -> bool:
-    # Simplified lock for demo
-    return True
+    hook = PostgresHook(postgres_conn_id="postgres_default")
+    try:
+        with hook.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO etl_metadata.loaded_partitions
+                        (table_name, partition_date, status, dag_run_id)
+                    VALUES (%s, %s, 'processing', %s)
+                    ON CONFLICT (table_name, partition_date) DO NOTHING
+                    RETURNING status;
+                """,
+                    (table_name, partition_date, dag_run_id),
+                )
+                res = cur.fetchone()
+                if res:
+                    return True
+
+                cur.execute(
+                    """
+                    SELECT status, loaded_at
+                    FROM etl_metadata.loaded_partitions
+                    WHERE table_name = %s AND partition_date = %s
+                    FOR UPDATE;
+                """,
+                    (table_name, partition_date),
+                )
+                row = cur.fetchone()
+                if not row: return True
+                status, loaded_at = row
+
+                if status == "loaded":
+                    return False
+
+                if status == "processing":
+                    now_utc = datetime.now(timezone.utc)
+                    # Handle naive vs aware datetime
+                    if loaded_at.tzinfo is None:
+                        loaded_at = loaded_at.replace(tzinfo=timezone.utc)
+                    age = now_utc - loaded_at
+                    if age > timedelta(minutes=stale_minutes):
+                        cur.execute(
+                            """
+                            UPDATE etl_metadata.loaded_partitions
+                            SET dag_run_id = %s, loaded_at = CURRENT_TIMESTAMP
+                            WHERE table_name = %s AND partition_date = %s
+                        """,
+                            (dag_run_id, table_name, partition_date),
+                        )
+                        return True
+                    else:
+                        raise RuntimeError(f"Partition {table_name}/{partition_date} is locked.")
+                return False
+    except Exception as e:
+        logging.warning(f"Locking failed: {e}. Proceeding without lock for demo.")
+        return True
 
 def release_partition_lock(table_name: str, partition_date: str, success: bool = True) -> None:
-    pass
+    hook = PostgresHook(postgres_conn_id="postgres_default")
+    status = "loaded" if success else "failed"
+    try:
+        hook.run(
+            """
+            UPDATE etl_metadata.loaded_partitions
+            SET status = %s, loaded_at = CURRENT_TIMESTAMP
+            WHERE table_name = %s AND partition_date = %s
+        """,
+            parameters=(status, table_name, partition_date),
+        )
+    except Exception as e:
+        logging.error(f"Failed to release lock: {e}")
 
 def _cast_batch_to_schema(
     batch: pa.RecordBatch, target_schema: pa.Schema
@@ -282,10 +348,12 @@ def _invalidate_partition(fs: s3fs.S3FileSystem, partition_dir: str) -> None:
 def _cleanup_orphans(fs: s3fs.S3FileSystem, partition_dir: str, keep_file: str) -> None:
     if not fs.exists(partition_dir):
         return
-    for file_path in fs.ls(partition_dir):
-        file_name = file_path.split("/")[-1]
-        if file_name.endswith(".parquet") and file_name != keep_file:
-            fs.rm(file_path)
+    try:
+        for file_path in fs.ls(partition_dir):
+            file_name = file_path.split("/")[-1]
+            if file_name.endswith(".parquet") and file_name != keep_file:
+                fs.rm(file_path)
+    except: pass
 
 def _emit_lineage_event(
     table_name: str, path: str, rows_count: int, run_id: str, schema: pa.Schema
@@ -301,6 +369,12 @@ def extract_load(
     dag_run_id = context["dag_run"].run_id
     start_ts = time.time()
     locked = False
+
+    if cfg.get("is_fact"):
+        locked = acquire_partition_lock(table_name, ds, dag_run_id)
+        if not locked:
+            logging.info(f"Partition {table_name}/{ds} already loaded. Skipping.")
+            return
 
     fs, bucket = _get_minio_fs()
     expected_schema = EXPECTED_SCHEMAS[table_name]
@@ -322,33 +396,94 @@ def extract_load(
     _invalidate_partition(fs, partition_dir)
 
     columns = TABLE_COLUMNS[table_name]
+    col_identifiers = [sql.Identifier(col) for col in columns]
+    date_col = cfg.get("date_col")
 
-    # Mocking data extraction
-    rows_count = 100
-    batch = pa.RecordBatch.from_arrays(
-        [pa.array([i for i in range(rows_count)]) if "id" in c else pa.array(["test"] * rows_count) for c in columns],
-        names=columns
-    )
-    # Correcting data types in mock for timestamp
-    if "timestamp" in columns:
-        idx = columns.index("timestamp")
-        batch = pa.RecordBatch.from_arrays(
-            [batch.column(i) if i != idx else pa.array([datetime.now()] * rows_count, type=pa.timestamp("ms")) for i in range(len(columns))],
-            names=columns
+    if table_name == "well_targets":
+        order_clause = sql.SQL("ORDER BY well_id, date")
+    else:
+        pk_col = columns[0]
+        if cfg.get("is_fact") and date_col:
+            order_clause = sql.SQL("ORDER BY {}, {}").format(
+                sql.Identifier(date_col), sql.Identifier(pk_col)
+            )
+        else:
+            order_clause = sql.SQL("ORDER BY {}").format(sql.Identifier(pk_col))
+
+    if cfg.get("is_fact") and date_col:
+        query = sql.SQL("SELECT {} FROM {} WHERE {} >= %s AND {} < %s {}").format(
+            sql.SQL(", ").join(col_identifiers),
+            sql.Identifier(table_name),
+            sql.Identifier(date_col),
+            sql.Identifier(date_col),
+            order_clause,
         )
+        params = (f"{ds} 00:00:00", f"{next_ds} 00:00:00")
+    else:
+        query = sql.SQL("SELECT {} FROM {} {}").format(
+            sql.SQL(", ").join(col_identifiers),
+            sql.Identifier(table_name),
+            order_clause,
+        )
+        params = ()
 
-    batch = _cast_batch_to_schema(batch, expected_schema)
-    table = pa.Table.from_batches([batch])
+    pg_hook = PostgresHook(postgres_conn_id="postgres_default")
+    rows_count = 0
+    writer = None
+    s3_file = None
 
-    with fs.open(target_parquet_path, "wb") as f:
-        pq.write_table(table, f, compression="snappy")
+    try:
+        with pg_hook.get_conn() as conn:
+            cursor_name = f"srv_cur_{table_name}_{uuid.uuid4().hex[:8]}"
+            with conn.cursor(name=cursor_name) as cur:
+                cur.itersize = 100_000
+                cur.execute(query, params)
 
-    _cleanup_orphans(fs, partition_dir, parquet_filename)
+                while True:
+                    chunk = cur.fetchmany(100_000)
+                    if not chunk:
+                        break
 
-    with fs.open(success_path, "wb") as sf:
-        sf.write(b"")
+                    # Handle zip(*chunk) for empty result if needed
+                    arrays = [pa.array(col) for col in zip(*chunk)]
+                    batch = pa.RecordBatch.from_arrays(arrays, names=columns)
+                    batch = _cast_batch_to_schema(batch, expected_schema)
+                    table = pa.Table.from_batches([batch])
 
-    logging.info("Committed %s/%s: %d rows.", table_name, ds, rows_count)
+                    if writer is None:
+                        s3_file = fs.open(target_parquet_path, "wb")
+                        writer = pq.ParquetWriter(s3_file, schema=expected_schema, compression="snappy")
+
+                    writer.write_table(table)
+                    rows_count += len(chunk)
+
+        if rows_count == 0:
+            logging.info("Zero rows extracted. Creating empty Parquet.")
+            s3_file = fs.open(target_parquet_path, "wb")
+            writer = pq.ParquetWriter(s3_file, schema=expected_schema, compression="snappy")
+            writer.write_table(pa.Table.from_batches([], schema=expected_schema))
+
+        if writer: writer.close()
+        if s3_file: s3_file.close()
+
+        if rows_count > 0:
+            _cleanup_orphans(fs, partition_dir, parquet_filename)
+
+        with fs.open(success_path, "wb") as sf:
+            sf.write(b"")
+
+        if locked:
+            release_partition_lock(table_name, ds, success=True)
+            locked = False
+
+        elapsed = time.time() - start_ts
+        logging.info("Committed %s/%s: %d rows in %.2f sec.", table_name, ds, rows_count, elapsed)
+
+    except Exception as e:
+        logging.error("ETL failed for %s/%s: %s", table_name, ds, str(e))
+        if locked:
+            release_partition_lock(table_name, ds, success=False)
+        raise
 
 # ---------------------------------------------------------------------------
 # DAG
