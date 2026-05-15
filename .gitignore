@@ -14,7 +14,7 @@ ENV/
 dist/
 build/
 
-# Jupyter Notebook (выводы и контрольные точки)
+# Jupyter Notebook
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 */.ipynb_checkpoints/*
@@ -29,7 +29,7 @@ build/
 postgres-data/
 pgdata/
 *.sql
-!docker-entrypoint-initdb.d/*.sql  # исключить, если нужны инициализационные скрипты
+!docker-entrypoint-initdb.d/*.sql  
 
 # MinIO data
 minio-data/
@@ -41,7 +41,7 @@ superset.db
 superset_config.py
 *.superset.db
 superset_home/
-*.json  # если не хотите хранить экспорт дашбордов, иначе уточнить
+*.json 
 
 # Airflow
 airflow.db
@@ -70,11 +70,11 @@ desktop.ini
 /data/external/
 *.parquet
 *.csv
-!test_*.csv   # если нужны тестовые маленькие файлы – исключить
+!test_*.csv   
 *.log
 *.tmp
 
-# ML models (если не хотите хранить бинарники в репозитории)
+# ML models
 models/*.pkl
 models/*.joblib
 !models/.gitkeep
@@ -89,3 +89,4 @@ models/*.joblib
 # =====================
 .directory
 *.lnk
+
