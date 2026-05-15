@@ -124,7 +124,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
         schema={
             "record_id": pl.Int32(),
             "well_id": pl.Int32(),
-            "timestamp": pl.Datetime("ms", "UTC"),
+            "timestamp": pl.Datetime("ms"),
             "pump_speed_rpm": pl.Float64(),
             "pump_current": pl.Float64(),
             "pressure_in": pl.Float64(),
@@ -175,7 +175,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
         schema={
             "record_id": pl.Int32(),
             "pump_id": pl.Int32(),
-            "timestamp": pl.Datetime("ms", "UTC"),
+            "timestamp": pl.Datetime("ms"),
             "temperature": pl.Float64(),
             "vibration": pl.Float64(),
             "current": pl.Float64(),
@@ -198,7 +198,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
         schema={
             "failure_id": pl.Int32(),
             "pump_id": pl.Int32(),
-            "failure_date": pl.Datetime("ms", "UTC"),
+            "failure_date": pl.Datetime("ms"),
             "failure_type": pl.String(),
             "downtime_hours": pl.Float64(),
         },

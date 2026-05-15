@@ -20,8 +20,8 @@ def get_last_watermark(
     Retrieves the maximum processed event_time for a given dataset.
     """
     query = """
-        SELECT last_processed_watermark 
-        FROM etl_metadata.pipeline_watermarks 
+        SELECT last_processed_watermark
+        FROM etl_metadata.pipeline_watermarks
         WHERE dataset = %s;
     """
     with get_postgres_connection(conn_id) as conn:
@@ -62,7 +62,7 @@ def publish_pipeline_metadata(
     """
     query = """
         INSERT INTO etl_metadata.pipeline_executions (
-            dataset, partition_date, processed_rows, quarantined_rows, 
+            dataset, partition_date, processed_rows, quarantined_rows,
             execution_time_sec, watermark, status, updated_at
         ) VALUES %s
         ON CONFLICT (dataset, partition_date) DO UPDATE SET

@@ -15,7 +15,7 @@ from dq_utils.dq_reporter import DQResult
 logger = logging.getLogger(__name__)
 
 
-def get_s3_storage_options(conn_id: str = "s3_default") -> dict:
+def get_s3_storage_options(conn_id: str = "aws_default") -> dict:
     """
     Retrieves credentials from Airflow Connection and returns storage_options
     compatible with Polars and s3fs.

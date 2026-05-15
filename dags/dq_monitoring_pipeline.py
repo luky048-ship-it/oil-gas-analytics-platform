@@ -38,7 +38,7 @@ def dq_pipeline():
 
     @task
     def get_s3_opts():
-        return get_s3_storage_options("s3_default")
+        return get_s3_storage_options("aws_default")
 
     s3_opts = get_s3_opts()
 
@@ -70,6 +70,10 @@ def dq_pipeline():
                 for p in paths:
                     # Валидация файла (Layer 1)
                     file_dq = validate_file_integrity(ds_name, p, opts)
+                    # Валидация свежести (Layer 5)
+                    fresh_dq = validate_data_freshness(ds_name, exec_date, contract_obj.freshness_sla_minutes or 1440, opts)
+                    all_dq_results.append(fresh_dq.__dict__)
+                    all_dq_results[-1]["created_at"] = all_dq_results[-1]["created_at"].isoformat()
                     all_dq_results.append(file_dq.__dict__)
                     # Сериализация даты для XCom
                     all_dq_results[-1]["created_at"] = all_dq_results[-1][
@@ -88,6 +92,7 @@ def dq_pipeline():
                             "value_ranges": contract_obj.value_ranges,
                             "enums": contract_obj.enums,
                             "custom_rules": contract_obj.custom_rules,
+                            "statistical_monitored_columns": contract_obj.statistical_monitored_columns,
                         },
                         historical_stats={},
                         execution_date=exec_date,

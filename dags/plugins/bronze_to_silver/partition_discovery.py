@@ -1,16 +1,18 @@
 # plugins/bronze_to_silver/partition_discovery.py
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+import logging
 
 import pyarrow.dataset as ds
 from pyarrow import fs
 
+logger = logging.getLogger(__name__)
 
 def discover_incremental_partitions(
     dataset: str,
     watermark: Optional[datetime],
     storage_options: Dict[str, Any],
-    bronze_base: str = "s3://datalake/bronze",
+    bronze_base: str = "s3://datalake/raw",
 ) -> List[str]:
     """
     Scans the S3 bucket using PyArrow dataset discovery to find all partitions
@@ -30,17 +32,24 @@ def discover_incremental_partitions(
         dataset_info = ds.dataset(
             dataset_path, filesystem=s3_fs, format="parquet", partitioning="hive"
         )
-    except FileNotFoundError:
+    except Exception as e:
+        logger.warning(f"Dataset path {dataset_path} not found or inaccessible: {e}")
         return []
 
     watermark_date = watermark.date() if watermark else None
     valid_partition_paths = set()
 
     for file_path in dataset_info.files:
-        # Extract directory path: e.g. datalake/bronze/production/partition_date=2024-01-01
-        dir_path = "/".join(file_path.split("/")[:-1])
+        # Extract directory path: e.g. datalake/raw/production/partition_date=2024-01-01
+        dir_parts = file_path.split("/")
+        if len(dir_parts) <= 1:
+            continue
+
+        dir_path = "/".join(dir_parts[:-1])
 
         if "partition_date=" not in dir_path:
+            # Master data tables like 'wells' might not have partition_date
+            valid_partition_paths.add(f"s3://{dataset_path}")
             continue
 
         part_str = dir_path.split("partition_date=")[-1].split("/")[0]

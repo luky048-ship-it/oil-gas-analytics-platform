@@ -184,7 +184,7 @@ def update_pipeline_watermark(
 def discover_incremental_partitions(
     dataset: str,
     watermark: datetime,
-    bronze_base: str = "s3://datalake/bronze",
+    bronze_base: str = "s3://datalake/raw",
 ) -> List[str]:
     """
     Использует pyarrow.dataset для сканирования структуры 

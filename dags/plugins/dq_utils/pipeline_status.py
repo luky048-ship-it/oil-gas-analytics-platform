@@ -23,11 +23,11 @@ def publish_pipeline_status(
 
     upsert_query = """
         INSERT INTO etl_metadata.dq_pipeline_runs (
-            dataset, 
-            partition_date, 
-            execution_date, 
-            status, 
-            created_at, 
+            dataset,
+            partition_date,
+            execution_date,
+            status,
+            created_at,
             updated_at
         ) VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (dataset, partition_date)

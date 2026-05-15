@@ -19,7 +19,7 @@ class DQResult:
     failed_rows: int
     checked_rows: int
     message: str
-    created_at: str  # ISO Format for JSON serialization
+    created_at: datetime
 
 
 def persist_dq_results(

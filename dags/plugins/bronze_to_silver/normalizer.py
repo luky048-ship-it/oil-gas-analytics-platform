@@ -24,7 +24,7 @@ def normalize_dataset(
 
         # Standardize timestamps: ensure UTC and truncate to seconds
         if dtype.base_type() == pl.Datetime:
-            expr = expr.dt.convert_time_zone("UTC").dt.truncate("1s")
+            expr = expr.dt.truncate("1s")
 
         # Handle NaN and Infinity for floats
         elif dtype.base_type() in (pl.Float32, pl.Float64):
