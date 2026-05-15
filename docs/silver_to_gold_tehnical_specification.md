@@ -1,378 +1,287 @@
-# Техническая спецификация DAG: `silver_to_gold_marts`
+## Техническая спецификация DAG `silver_to_gold_marts`
+
+**Назначение:** Регламентировать архитектуру, модульную структуру, контракты данных и поведение производственного пайплайна трансформации данных из Silver-слоя (S3/MinIO) в Gold-слой (PostgreSQL) для платформы аналитики нефтедобычи.
 
 ---
 
-## 1. Архитектурная цель DAG
-Сформировать **6 аналитических витрин Gold‑слоя** на основе очищенных и валидированных данных Silver‑слоя с соблюдением следующих принципов:
-- **Idempotent & retry‑safe** — любой повторный запуск за тот же период не дублирует данные.
-- **Incremental only** — обработка только новых партиций, без полного исторического пересчёта.
-- **BI‑ready** — витрины оптимизированы для мгновенной отрисовки в Apache Superset (линейные графики, тепловые карты, KPI‑дашборды).
-- **ML‑ready** — витрины содержат предрассчитанные признаки (lag, rolling statistics) и целевые переменные, готовые для моделей прогнозирования отказов и дебита.
-- **Atomic loading** — публикация данных в production‑таблицы через staging‑таблицы и транзакционную подмену партиций.
+### 1. Общая архитектура и назначение
 
----
+DAG `silver_to_gold_marts` реализует третий этап медальонной архитектуры (Silver → Gold). Его задача — на основе очищенных, нормализованных и дедуплицированных данных Silver-слоя сформировать **четыре аналитические витрины**, готовые для потребления BI-системами (Apache Superset) и ML-инженерами.
 
-## 2. Граф зависимостей (Dependency Graph)
+**Основные цели:**
+- Преобразование детальных Silver-событий в бизнес-ориентированные агрегаты.
+- Расчёт ключевых показателей эффективности (KPI) нефтедобычи.
+- Выявление аномалий и предиктивных метрик для обслуживания оборудования.
+- Предоставление логистической аналитики с удельными затратами.
+- Обеспечение атомарной, идемпотентной и восстанавливаемой загрузки витрин.
 
-### 2.1 Инфраструктурные связи
-```mermaid
-graph TD
-    Airflow[Airflow 2.8 Orchestrator] -->|Управляет| DAG
-    DAG[silver_to_gold_marts] -->|Читает Silver| MinIO[(MinIO/S3 - Silver Layer)]
-    DAG -->|Читает/Пишет метаданные| PostgresMeta[(Postgres: etl_metadata)]
-    DAG -->|Загружает витрины| PostgresGold[(Postgres: gold schema)]
-    PostgresGold -->|Serves| Superset[Apache Superset]
-    PostgresGold -->|Serves| Jupyter[Jupyter ML]
-    MinIO -->|Хранит curated Parquet| SilverSets[Silver datasets: production, telemetry, sensors, failures, deliveries, etc.]
-    DAG -->|Использует| PolarsLib[Polars Lazy Engine]
-    DAG -->|Использует| ADBC[ADBC PostgreSQL Driver]
+**Ключевые архитектурные принципы:**
+- **Инкрементальная обработка** – только новые партиции относительно последнего сохранённого водяного знака (watermark).
+- **Ленивые вычисления (Polars Lazy)** – минимизация потребления памяти, потоковая агрегация.
+- **Атомарная публикация (staging + swap)** – витрины никогда не находятся в «сломанном» состоянии.
+- **Соблюдение контрактов схем** – структура и типы данных строго соответствуют утверждённым спецификациям Gold-слоя.
+- **Идемпотентность** – повторный запуск за ту же дату не создаёт дубликатов и не искажает метрики.
+- **Отказоустойчивость** – любые нарушения целостности данных приводят к автоматическому откату транзакции.
+
+**Архитектурная схема (высокоуровневая):**
+```
+Silver Layer (MinIO/S3) → DAG silver_to_gold_marts → Gold Layer (PostgreSQL)
+    ↓
+etl_metadata (PostgreSQL) – управление водяными метками и статусами
 ```
 
-### 2.2 Внутренние Python‑модули (все файлы)
-Все файлы размещены в пакете `plugins/gold_layer/` (или аналогичной структуре, доступной Airflow). Минимальный список модулей:
+---
 
-| Файл (модуль) | Назначение |
-|---------------|------------|
-| `dag_silver_to_gold_marts.py` | DAG‑файл, определяющий граф задач |
-| `gold_layer/__init__.py` | Инициализация пакета |
-| `gold_layer/constants.py` | Имена таблиц, столбцов, путей S3, единицы измерения |
-| `gold_layer/connections.py` | `get_s3_storage_options()`, `get_postgres_connection()` |
-| `gold_layer/watermarks.py` | `get_last_watermark()`, `update_mart_watermark()` |
-| `gold_layer/partition_utils.py` | `discover_incremental_partitions()` |
-| `gold_layer/loaders.py` | `load_silver_dataset()` |
-| `gold_layer/validators.py` | `validate_business_readiness()`, `validate_mart_before_publish()` |
-| `gold_layer/builders/mart_production.py` | `build_mart_production()` |
-| `gold_layer/builders/mart_well_kpi.py` | `build_mart_well_kpi()` |
-| `gold_layer/builders/mart_failures.py` | `build_mart_failures()` |
-| `gold_layer/builders/mart_logistics.py` | `build_mart_logistics()` |
-| `gold_layer/builders/mart_ml_features.py` | `build_mart_ml_features()` |
-| `gold_layer/builders/mart_risk_scores.py` | `build_mart_risk_scores()` |
-| `gold_layer/publishers.py` | `write_staging_mart()`, `atomic_partition_swap()`, `publish_mart_metadata()`, `publish_gold_layer_status()` |
-| `gold_layer/sql_templates.py` | SQL‑шаблоны для создания staging‑таблиц, валидационных запросов |
-| `gold_layer/metadata.py` | Класс `MartBuildResult` и вспомогательные структуры |
+### 2. Граф зависимостей (файлы и модули)
 
-### 2.3 Стек библиотек
+DAG и вся его логика разбиты на изолированные Python-модули, расположенные в директории `plugins/gold_layer/`. Это обеспечивает тестируемость, переиспользование и чёткое разделение ответственности.
 
-#### Обязательные (разрешённые):
+**Структура файлов:**
+
+```
+airflow/dags/
+└── dag_silver_to_gold_marts.py          # Определение DAG (только оркестрация)
+
+plugins/gold_layer/
+├── __init__.py
+├── constants.py                          # Имена таблиц, путей, допустимых значений
+├── connections.py                        # get_s3_storage_options, get_postgres_connection
+├── watermarks.py                         # get_last_watermark, update_mart_watermark
+├── partition_utils.py                    # discover_incremental_partitions
+├── loaders.py                            # load_silver_dataset
+├── validators.py                         # validate_business_readiness, validate_mart_before_publish
+├── builders/
+│   ├── __init__.py
+│   ├── mart_production.py                # build_mart_production
+│   ├── mart_well_kpi.py                  # build_mart_well_kpi
+│   ├── mart_failures.py                  # build_mart_failures
+│   └── mart_logistics.py                 # build_mart_logistics
+├── publishers.py                         # write_staging_mart, atomic_partition_swap, publish_*
+├── sql_templates.py                      # SQL-запросы для проверок, создания staging и swap
+└── metadata.py                           # MartBuildResult dataclass и вспомогательные функции
+```
+
+**Граф зависимостей между модулями (упрощённый):**
+- `dag_silver_to_gold_marts.py` → импортирует все вышеперечисленные модули как задачи.
+- `builders/*` → импортируют `constants`, используют `pl.LazyFrame`.
+- `validators.py` → импортирует `constants`, использует `pl.LazyFrame`, `sql_templates`.
+- `publishers.py` → импортирует `connections`, `sql_templates`, `metadata`.
+- `loaders.py` → импортирует `connections`.
+
+---
+
+### 3. Стек обязательных библиотек
+
+**Разрешённый и обязательный к использованию набор:**
+
+| Библиотека | Назначение |
+|------------|------------|
+| `apache-airflow >=2.8` | Оркестрация, декораторы `@task`, пулы, SLA |
+| `polars >=0.20` | Все трансформации данных (ленивый режим) |
+| `s3fs` | Файловый интерфейс к MinIO/S3 |
+| `pyarrow` | Чтение метаданных Parquet, работа с Arrow-схемами |
+| `adbc-driver-postgresql` + `pyarrow` | Высокоскоростная пакетная загрузка в PostgreSQL |
+| `psycopg2-binary` / `psycopg2` | Транзакционные операции, DDL, запросы метаданных |
+| `pydantic` (опционально) | Валидация конфигураций и dataclass |
+
+**Категорически запрещены:**
+- `pandas` (нагрузка на память, однопоточность)
+- `pyspark` (избыточен для задачи, не соответствует легковесному стеку)
+- `dask` (аналогично)
+- ORM (SQLAlchemy и подобные) для загрузки данных (только для метаданных допустимо, но в спецификации – чистый psycopg2).
+
+---
+
+### 4. Структура DAG (Airflow)
+
+DAG имеет уникальный идентификатор `silver_to_gold_marts` и выполняется ежедневно.
+
+**Основные параметры:**
 ```python
-from __future__ import annotations
-
-import logging
-import os
-from datetime import datetime, timedelta
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
-
-import polars as pl          # lazy transformations
-import s3fs                  # S3 filesystem interface
-
-from airflow import DAG
-from airflow.decorators import task
-from airflow.exceptions import AirflowFailException
-from airflow.hooks.base import BaseHook
-from airflow.providers.postgres.hooks.postgres import PostgresHook
-from psycopg2 import sql
+schedule_interval="@daily"
+catchup=True
+max_active_runs=1
+retries=2
+retry_delay=timedelta(minutes=5)
+execution_timeout=timedelta(hours=2)
+sla=timedelta(hours=1)
+pool="gold_pool"        # ограничивает количество одновременных подключений к PostgreSQL
 ```
 
-#### Дополнительно разрешённые (для высокопроизводительной загрузки):
-```python
-import pyarrow as pa
-import pyarrow.parquet as pq
-import adbc_driver_postgresql.dbapi as adbc_postgres
+**Граф задач (Task Flow):**
+```
+[get_last_watermark] --> [discover_incremental_partitions] --> [load_silver_datasets]
+    --> [validate_business_readiness]
+    --> [build_mart_production, build_mart_failures, build_mart_logistics] (параллельно)
+    --> [build_mart_well_kpi] (после build_mart_production)
+    --> [write_staging_mart] (для каждой витрины)
+    --> [validate_mart_before_publish] (для каждой)
+    --> [atomic_partition_swap] (для каждой)
+    --> [update_mart_watermark]
+    --> [publish_mart_metadata]
+    --> [publish_gold_layer_status]
 ```
 
-#### Категорически запрещены:
-```python
-import pandas as pd
-import pyspark
-import dask
-```
+**Важно:** Все операции с данными реализованы через декорированные `@task` Python-функции. Логика трансформаций не зашита в тело DAG-файла, а вынесена в соответствующие модули.
 
 ---
 
-## 3. Входящие сигнатуры данных (Input Contracts)
+### 5. Сигнатуры функций (вход/выход)
 
-DAG читает исключительно **Silver‑слой** (Curated Parquet), сформированный предыдущим пайплайном `bronze_to_silver`. Каждый датасет гарантирует соблюдение Schema Contracts, дедупликацию и нормализацию.
-
-| Silver Dataset | Путь на S3 (префикс) | Схема контракта (основные столбцы) |
-|---------------|----------------------|-----------------------------------|
-| `production` | `s3://datalake/silver/production/partition_date=YYYY-MM-DD/` | `prod_id, well_id, date, oil_ton, gas_m3, water_m3, energy_kwh, downtime_hours, temperature, pressure` |
-| `well_telemetry` | `s3://datalake/silver/well_telemetry/partition_date=YYYY-MM-DD/` | `record_id, well_id, timestamp, pump_speed_rpm, pump_current, pressure_in, pressure_out, temperature, vibration, oil_flow_rate` |
-| `well_targets` | `s3://datalake/silver/well_targets/partition_date=YYYY-MM-DD/` | `well_id, date, daily_oil_ton` |
-| `pump_sensors` | `s3://datalake/silver/pump_sensors/partition_date=YYYY-MM-DD/` | `record_id, pump_id, timestamp, temperature, vibration, current, rpm, pressure` |
-| `pump_failures` | `s3://datalake/silver/pump_failures/partition_date=YYYY-MM-DD/` | `failure_id, pump_id, failure_date, failure_type, downtime_hours` |
-| `deliveries` | `s3://datalake/silver/deliveries/partition_date=YYYY-MM-DD/` | `delivery_id, date, source, destination, product_type, volume_ton, cost_usd, delay_hours, distance_km, weather_conditions, driver_id, vehicle_id` |
-| `drivers` | `s3://datalake/silver/drivers/partition_date=YYYY-MM-DD/` | `driver_id, name, experience_years, region` |
-| `vehicles` | `s3://datalake/silver/vehicles/partition_date=YYYY-MM-DD/` | `vehicle_id, plate_number, capacity_ton, fuel_type` |
-| `pumps` | `s3://datalake/silver/pumps/partition_date=YYYY-MM-DD/` | `pump_id, well_id, type, install_date, manufacturer, model` |
-| `wells` | `s3://datalake/silver/wells/` | `well_id, name, field_name, region, start_date, operator, status` |
-
-Примечание: Справочники (wells, pumps, drivers, vehicles) загружаются на полную глубину (без фильтрации по watermark), так как их объём мал, а для корректных JOIN необходимы все записи.
-
-DAG также читает из PostgreSQL таблицы метаданных:
-- `etl_metadata.pipeline_watermarks` – последний обработанный watermark для каждой витрины.
-- `etl_metadata.marts_loaded_partitions` – история загрузок (для отказоустойчивости).
-
----
-
-## 4. Основная логика DAG (Task Flow)
-
-```mermaid
-graph LR
-    Start[begin] --> GetWatermarks[get_last_watermark для всех витрин]
-    GetWatermarks --> Discover[discover_incremental_partitions по production дате]
-    Discover --> LoadSilver[load_silver_dataset для каждого домена]
-    LoadSilver --> ValidateBusiness[validate_business_readiness для всех входных наборов]
-    ValidateBusiness --> BuildMarts[Построение 6 LazyFrame витрин]
-    BuildMarts --> WriteStaging[write_staging_mart для каждой витрины]
-    WriteStaging --> ValidateMarts[validate_mart_before_publish]
-    ValidateMarts --> AtomicSwap[atomic_partition_swap]
-    AtomicSwap --> UpdateMeta[update_mart_watermark]
-    UpdateMeta --> PublishMeta[publish_mart_metadata]
-    PublishMeta --> PublishStatus[publish_gold_layer_status]
-    PublishStatus --> End[finish]
-```
-
-Все трансформации выполняются **лениво**; материализация происходит только при записи в staging‑таблицы и при финальной валидации (подсчёт количества строк, проверки уникальности) – но даже там используются SQL‑запросы к staging‑таблицам, а не `collect()`.
-
-### 4.1 Конфигурация Airflow DAG
-```python
-with DAG(
-    dag_id="silver_to_gold_marts",
-    schedule_interval="@daily",
-    start_date=datetime(2024, 1, 1),
-    catchup=True,
-    max_active_runs=1,
-    default_args={
-        "owner": "data-eng",
-        "retries": 2,
-        "retry_delay": timedelta(minutes=5),
-        "execution_timeout": timedelta(hours=2),
-        "sla": timedelta(hours=1),
-        "pool": "gold_pool",
-    },
-    tags=["gold", "production"],
-) as dag:
-```
-
-### 4.2 Ключевые задачи (декорированные Python‑функции)
-Каждая задача соответствует одной или нескольким функциям из обязательного списка. Задачи объединяют логику так, чтобы сохранить модульность.
-
-- `task_get_watermarks` → вызывает `get_last_watermark` для шести витрин, возвращает dict.
-- `task_discover_partitions` → для каждого доменного датасета вызывает `discover_incremental_partitions`.
-- `task_load_silver` → формирует `pl.LazyFrame` для каждого датасета через `load_silver_dataset`.
-- `task_validate_readiness` → проверяет все загруженные LazyFrame через `validate_business_readiness`.
-- `task_build_production` → `build_mart_production(...)`
-- `task_build_well_kpi` → `build_mart_well_kpi(...)`
-- `task_build_failures` → `build_mart_failures(...)`
-- `task_build_logistics` → `build_mart_logistics(...)`
-- `task_build_ml_features` → `build_mart_ml_features(...)`
-- `task_build_risk_scores` → `build_mart_risk_scores(...)`
-- `task_write_staging` → для каждой витрины вызывает `write_staging_mart`.
-- `task_validate_marts` → для каждой витрины вызывает `validate_mart_before_publish`.
-- `task_atomic_swap` → для каждой витрины вызывает `atomic_partition_swap`.
-- `task_update_watermarks` → для каждой витрины вызывает `update_mart_watermark`.
-- `task_publish_metadata` → для каждой витрины вызывает `publish_mart_metadata` с объектом `MartBuildResult`.
-- `task_publish_status` → вызывает `publish_gold_layer_status`.
-
-Задачи объединены в цепочку зависимостей согласно графу.
-
----
-
-## 5. Детальные сигнатуры и контракты функций
-
-### 5.1 Конфигурация S3
+#### 5.1. Получение настроек S3
 ```python
 def get_s3_storage_options() -> dict:
-    """
-    Извлекает параметры подключения к MinIO из Airflow Connection 'aws_default'.
-    Возвращает словарь, пригодный для storage_options в Polars scan_parquet.
-    """
 ```
-- **Логика:** Читает `BaseHook.get_connection("aws_default")`, использует поля `extra` (endpoint_url, aws_access_key_id, aws_secret_access_key) и формирует словарь с ключами `endpoint_url`, `access_key_id`, `secret_access_key`, `region` и т.д.
+**Назначение:** Извлекает параметры подключения к MinIO/S3 из Airflow Connection `aws_default`.  
+**Вход:** Нет (читает окружение Airflow).  
+**Выход:** Словарь с ключами `endpoint_url`, `aws_access_key_id`, `aws_secret_access_key`, `use_ssl` и т.д., готовый для передачи в `storage_options` методов Polars.
 
-### 5.2 Управление Watermark
+#### 5.2. Управление водяными метками
 ```python
 def get_last_watermark(mart_name: str) -> Optional[datetime]:
-    """
-    Читает из etl_metadata.pipeline_watermarks последний успешный watermark для витрины mart_name.
-    Возвращает datetime в UTC или None, если витрина ещё не загружалась.
-    """
 ```
-- **Реализация:** `SELECT COALESCE(MAX(watermark_ts), NULL) FROM etl_metadata.pipeline_watermarks WHERE pipeline_name = %s AND status = 'success'`.
+**Назначение:** Возвращает последнюю успешно обработанную дату партиции для указанной витрины.  
+**Вход:** `mart_name` – строка, например `"mart_production"`.  
+**Выход:** `datetime` в UTC или `None`, если витрина ещё ни разу не загружалась.  
+**Источник:** Таблица `etl_metadata.pipeline_watermarks`.
 
 ```python
 def update_mart_watermark(mart_name: str, watermark: datetime) -> None:
-    """
-    Атомарно обновляет (UPSERT) watermark для витрины.
-    Используется после успешного atomic swap.
-    """
 ```
-- **Реализация:** `INSERT INTO etl_metadata.pipeline_watermarks ... ON CONFLICT (pipeline_name) DO UPDATE SET watermark_ts = EXCLUDED.watermark_ts, status = 'success', updated_at = now()`.
+**Назначение:** Атомарно фиксирует новую метку времени после успешной загрузки витрины.  
+**Вход:** `mart_name`, `watermark` – дата, которую следует сохранить.  
+**Выход:** `None`. Выполняет UPSERT в `etl_metadata.pipeline_watermarks`.
 
-### 5.3 Поиск инкрементальных партиций
+#### 5.3. Обнаружение новых партиций
 ```python
-def discover_incremental_partitions(dataset: str, watermark: datetime) -> List[str]:
-    """
-    Сканирует S3-префикс s3://datalake/silver/{dataset}/ и возвращает список путей к партициям 
-    (вида partition_date=YYYY-MM-DD), у которых дата партиции > watermark.
-    Использует s3fs для листинга, избегая полного сканирования исторических данных.
-    """
+def discover_incremental_partitions(dataset: str, watermark: Optional[datetime]) -> List[str]:
 ```
+**Назначение:** Выдаёт список S3-путей к новым партициям Silver-слоя, которые ещё не были обработаны.  
+**Вход:**  
+- `dataset` – имя датасета (например, `"production"`)  
+- `watermark` – последняя обработанная дата; если `None`, берутся все доступные партиции.  
+**Выход:** Список строк вида `s3://datalake/silver/production/partition_date=2024-06-15/`.  
+**Логика:** Сканирует префикс в MinIO, фильтрует по дате с учётом 24-часового окна для поздних данных (watermark – 1 день).
 
-### 5.4 Загрузка Silver‑слоя
+#### 5.4. Загрузка Silver-слоя
 ```python
 def load_silver_dataset(dataset_path: str, storage_options: dict) -> pl.LazyFrame:
-    """
-    Открывает одну партицию Silver‑данных с помощью pl.scan_parquet.
-    Никакой материализации, только план запроса.
-    """
 ```
-- **Пример вызова:** `load_silver_dataset(f"s3://datalake/silver/production/{partition}", get_s3_storage_options())`
+**Назначение:** Создаёт ленивый фрейм (план запроса) для чтения Parquet-файлов одной партиции.  
+**Вход:**  
+- `dataset_path` – полный путь к партиции.  
+- `storage_options` – словарь для доступа к S3.  
+**Выход:** `pl.LazyFrame` без какой-либо материализации. Используется `scan_parquet`.
 
-### 5.5 Валидация бизнес‑готовности
+#### 5.5. Валидация бизнес-готовности
 ```python
 def validate_business_readiness(lf: pl.LazyFrame, dataset: str) -> None:
-    """
-    Проверяет, что LazyFrame содержит все обязательные столбцы согласно контракту для dataset,
-    что критические колонки (PK, FK, event_time) не содержат null,
-    и что числовые показатели находятся в допустимых диапазонах.
-    При нарушении CRITICAL правил выбрасывается AirflowFailException.
-    При нарушениях HIGH – строки не отбрасываются, но инцидент логируется в метаданные.
-    """
 ```
-- **Реализация:** Использует `lf.select(pl.all().is_null().any())` и `lf.describe()` в ленивом режиме, но для проверки диапазонов возможна материализация агрегатов (`min`, `max`) через частичный `collect()` — допустимо, т.к. затрагивает только агрегированные значения, а не весь датасет.
+**Назначение:** Проверяет, что загруженные из Silver данные удовлетворяют минимальным требованиям для построения витрин.  
+**Вход:**  
+- `lf` – ленивый фрейм с сырыми данными.  
+- `dataset` – имя датасета для выбора специфических правил.  
+**Выход:** `None`. В случае критических нарушений (отсутствие обязательных колонок, NULL в первичном ключе) выбрасывает `AirflowFailException`.  
+**Проверяемые аспекты:** соответствие схемы, наличие обязательных бизнес-столбцов, валидность диапазонов ключевых метрик, отсутствие недопустимых значений.
 
-### 5.6 Построение витрин (примеры сигнатур)
+#### 5.6. Построение витрин
+
+**5.6.1. Витрина добычи**
 ```python
 def build_mart_production(
     lf_production: pl.LazyFrame,
     lf_telemetry: pl.LazyFrame,
     lf_targets: pl.LazyFrame
 ) -> pl.LazyFrame:
-    """
-    Группирует daily production, джойнит с агрегированной телеметрией (средние температура, давление, 
-    pump_speed_rpm, max vibration и т.д.) и целевыми показателями.
-    Вычисляет production_efficiency = oil_ton / daily_target_ton, downtime_pct.
-    Результат соответствует схеме gold.mart_production.
-    """
 ```
+**Назначение:** Агрегирует суточную добычу, обогащает средними показателями телеметрии (давление, температура, вибрация) и плановыми целями. Рассчитывает эффективность.  
+**Вход:** Три ленивых фрейма из соответствующих Silver-датасетов.  
+**Выход:** `pl.LazyFrame`, схема которого соответствует `gold.mart_production` (mart_id, well_id, date, oil_ton, gas_m3, ..., production_efficiency, downtime_pct, partition_date).
 
+**5.6.2. Витрина KPI скважин**
 ```python
-def build_mart_well_kpi(lf_production: pl.LazyFrame) -> pl.LazyFrame:
-    """
-    На основе mart_production (или его LazyFrame) рассчитывает скользящие средние, 
-    ранги производительности, классификацию performance_group.
-    """
+def build_mart_well_kpi(lf_mart_production: pl.LazyFrame) -> pl.LazyFrame:
 ```
+**Назначение:** На основе витрины добычи вычисляет скользящие средние, ранги производительности, классификацию `performance_group`.  
+**Вход:** `lf_mart_production` – результат `build_mart_production`.  
+**Выход:** Ленивый фрейм, соответствующий `gold.mart_well_kpi`.
 
+**5.6.3. Витрина отказов и аномалий**
 ```python
 def build_mart_failures(
     lf_sensors: pl.LazyFrame,
     lf_failures: pl.LazyFrame
 ) -> pl.LazyFrame:
-    """
-    Вычисляет Z‑оценки для вибрации и температуры, флаги аномалий,
-    джойнит с известными отказами для разметки is_failure.
-    Генерирует risk_score (на основе эвристик или предобученной ML‑модели, 
-    но здесь – детерминированный расчёт на базе статистик).
-    """
 ```
+**Назначение:** Вычисляет статистические Z-оценки вибрации и температуры для каждого насоса, флаги аномалий, объединяет с историческими отказами. Генерирует риск-метрики и вероятности отказа.  
+**Вход:** Данные датчиков (`pump_sensors`) и зарегистрированных отказов (`pump_failures`).  
+**Выход:** `gold.mart_failures`.
 
+**5.6.4. Витрина логистики**
 ```python
 def build_mart_logistics(
     lf_deliveries: pl.LazyFrame,
     lf_drivers: pl.LazyFrame,
     lf_vehicles: pl.LazyFrame
 ) -> pl.LazyFrame:
-    """
-    Обогащает поставки справочниками, вычисляет cost_per_km, cost_per_ton, delay_flag, weather_impact.
-    """
 ```
+**Назначение:** Обогащает данные о поставках справочной информацией о водителях и транспортных средствах, вычисляет удельную стоимость (cost_per_km, cost_per_ton), флаг задержки и влияние погоды.  
+**Вход:** Три ленивых фрейма.  
+**Выход:** `gold.mart_logistics`.
 
-```python
-def build_mart_ml_features(
-    lf_telemetry: pl.LazyFrame,
-    lf_targets: pl.LazyFrame
-) -> pl.LazyFrame:
-    """
-    Формирует ML‑признаки: лаговые значения (lag_1h, lag_24h), скользящие средние (rolling_mean_6h), 
-    накопительные суммы, а также выравнивает с целевой переменной daily_oil_ton.
-    """
-```
-
-```python
-def build_mart_risk_scores(
-    lf_sensors: pl.LazyFrame,
-    lf_failures: pl.LazyFrame
-) -> pl.LazyFrame:
-    """
-    Рассчитывает failure_probability на основе скользящих статистик аномалий.
-    Результат соответствует gold.mart_risk_scores (фактически часть mart_failures, 
-    может быть отдельной витриной).
-    """
-```
-
-### 5.7 Запись в staging‑таблицы
+#### 5.7. Запись в staging
 ```python
 def write_staging_mart(lf: pl.LazyFrame, staging_table: str) -> int:
-    """
-    Материализует LazyFrame в PostgreSQL staging‑таблицу.
-    Использует ADBC batch ingestion (pyarrow flight) для максимальной пропускной способности.
-    Возвращает количество вставленных строк.
-    """
 ```
-- **Реализация:** Преобразует план в поток Arrow RecordBatch и записывает через `adbc_driver_postgresql`. **Запрещён** row‑by‑row INSERT.
+**Назначение:** Материализует ленивый фрейм во временную таблицу в схеме `staging`, используя высокоскоростной ADBC-драйвер.  
+**Вход:**  
+- `lf` – готовый ленивый план для витрины.  
+- `staging_table` – полное имя staging-таблицы (например, `staging.stg_mart_production`).  
+**Выход:** Число фактически вставленных строк (для контроля).  
+**Примечание:** Запрещена построчная вставка; используется потоковая передача Arrow-батчей.
 
-### 5.8 Валидация витрины перед публикацией
+#### 5.8. Финальная валидация витрины
 ```python
 def validate_mart_before_publish(mart_name: str, staging_table: str) -> None:
-    """
-    Выполняет SQL‑запросы к staging‑таблице для проверки:
-    - Количество строк > 0
-    - Отсутствие NULL в критических бизнес‑ключах
-    - Отсутствие дубликатов первичного ключа
-    - Значения параметров в допустимых диапазонах (согласно контракту).
-    При любом CRITICAL нарушении – AirflowFailException.
-    """
 ```
+**Назначение:** Выполняет SQL-проверки уже загруженной staging-таблицы.  
+**Вход:** `mart_name` (для выбора правил), `staging_table`.  
+**Выход:** `None`. При провале – `AirflowFailException`.  
+**Проверки:** количество строк > 0, уникальность первичного ключа, отсутствие NULL в критических колонках, соблюдение числовых диапазонов, согласованность partition_date.
 
-### 5.9 Атомарная подмена партиции
+#### 5.9. Атомарная замена партиции
 ```python
 def atomic_partition_swap(target_table: str, staging_table: str, partition_date: str) -> None:
-    """
-    В рамках одной транзакции:
-    1. Удаляет из target_table строки, где partition_date = {partition_date}.
-    2. Вставляет все строки из staging_table в target_table.
-    3. COMMIT.
-    При ошибке – ROLLBACK, исходная витрина не повреждается.
-    """
 ```
+**Назначение:** В одной транзакции удаляет из целевой Gold-таблицы строки за указанную дату и вставляет содержимое staging-таблицы.  
+**Вход:**  
+- `target_table` – полное имя Gold-таблицы.  
+- `staging_table` – имя временной таблицы.  
+- `partition_date` – дата партиции для удаления/вставки.  
+**Выход:** `None`. Гарантирует, что потребители (Superset) не увидят промежуточного состояния.
 
-### 5.10 Публикация метаданных
+#### 5.10. Публикация метаданных и статуса
 ```python
 def publish_mart_metadata(result: MartBuildResult) -> None:
-    """
-    Записывает в etl_metadata.marts_loaded_partitions информацию о выполненной загрузке:
-    mart_name, partition_date, количество строк, время выполнения и т.д.
-    """
 ```
+**Назначение:** Записывает в `etl_metadata.marts_loaded_partitions` сведения о выполненной загрузке (имя витрины, дата, количество строк, длительность).  
+**Вход:** Объект `MartBuildResult`.  
+**Выход:** `None`.
 
 ```python
 def publish_gold_layer_status(mart_name: str, execution_date: str, status: str) -> None:
-    """
-    Фиксирует общий статус витрины за дату выполнения (success / failed).
-    Используется для downstream‑оповещений (Superset refresh, ML pipeline trigger).
-    """
 ```
+**Назначение:** Фиксирует итоговый статус загрузки витрины (success/failed) для внешних систем мониторинга.  
+**Вход:** `mart_name`, `execution_date` в виде строки `YYYY-MM-DD`, `status`.  
+**Выход:** `None`.
 
-### 5.11 Вспомогательный dataclass
+#### 5.11. Вспомогательная структура данных
 ```python
 @dataclass
 class MartBuildResult:
     mart_name: str
-    processed_rows: int        # количество строк во входном Silver за период
-    inserted_rows: int         # строк вставлено в staging
+    processed_rows: int
+    inserted_rows: int
     execution_time_sec: float
     partition_date: str
     watermark: datetime
@@ -380,48 +289,91 @@ class MartBuildResult:
 
 ---
 
-## 6. Стратегия инкрементальной обработки
+### 6. Детализация ключевых модулей
 
-- **Watermark:** Для каждой витрины хранится последняя обработанная `partition_date` (или `event_time` максимум, но в контексте daily‑агрегаций — дата партиции).  
-- **Обработка late events:** Поскольку Silver‑слой гарантирует дедупликацию и временное окно 10‑минутного опоздания для телеметрии, Gold‑слой может безопасно пересчитывать витрины за последние 1–2 дня (rolling window). На практике DAG пересчитывает текущий день и вчерашний (если есть новые данные), используя watermark как начало окна. Это реализуется через `discover_incremental_partitions` с логикой: вернуть все партиции, у которых дата >= watermark - 1 day.  
-- **Атомарность:** Старые партиции в Gold‑таблицах заменяются целиком через `atomic_partition_swap`. Удаление и вставка в одной транзакции гарантируют, что дашборды Superset никогда не увидят «пустого» состояния.
+#### 6.1. Модуль `watermarks.py`
+- Хранит логику взаимодействия с таблицей `etl_metadata.pipeline_watermarks`.
+- При первом запуске возвращает `None`, что заставляет `discover_incremental_partitions` обработать все доступные партиции (историческая загрузка).
+- Обновление метки происходит **после** успешного `atomic_partition_swap`, чтобы повторная попытка не пропустила данные.
 
----
+#### 6.2. Модуль `builders/mart_failures.py`
+- Содержит наиболее сложную логику: оконные функции для расчёта средних и стандартных отклонений по pump_id, вычисление Z-score `(x - mean) / std`.
+- Аномалия фиксируется при превышении порога (`|z| > 3`).
+- Риск-скор вычисляется как скользящее среднее числа аномалий за 7 дней.
+- Все вычисления выполняются лениво с использованием `pl.when().then()`, `over()`, `rolling_mean()`, без материализации промежуточных результатов.
 
-## 7. Согласованность со Schema Contracts
+#### 6.3. Модуль `publishers.py`
+- `write_staging_mart` конвертирует `LazyFrame.collect()` в `pyarrow.Table` и использует `adbc_driver_postgresql` для выполнения `COPY`-подобной вставки с автоматическим маппингом типов.
+- `atomic_partition_swap` реализован через `psycopg2` с явным `BEGIN`, `DELETE`, `INSERT INTO ... SELECT * FROM staging`, `COMMIT`. В случае ошибки – `ROLLBACK`.
 
-- Все выходные витрины строго следуют таблицам контрактов `gold.mart_production`, `gold.mart_well_kpi`, `gold.mart_failures`, `gold.mart_logistics`, `gold.mart_ml_features`, `gold.mart_risk_scores`.
-- Типы данных в Polars LazyFrame принудительно приводятся к физическим типам, соответствующим контракту (`Int32`, `Float64`, `Date`, `Datetime("s")`, `Utf8`).
-- Проверки диапазонов (`pressure between 0 and 1000` и др.) выполняются на этапе `validate_business_readiness` и `validate_mart_before_publish` с уровнями критичности, заданными в контрактах.
-- Орфанные FK не могут появиться, так как Silver‑слой гарантирует referential integrity; Gold‑слой добавляет только проверку через `LEFT JOIN` и фильтрацию null‑ключей при построении.
-
----
-
-## 8. Обработка ошибок и отказоустойчивость
-
-| Слой | Тип ошибки | Поведение |
-|------|------------|-----------|
-| Чтение S3 | Файл не найден, битый Parquet | `AirflowFailException`, retry через Airflow |
-| Валидация контракта | Отсутствие обязательной колонки | `AirflowFailException` |
-| Построение витрины | Деление на ноль, переполнение | Логируется, проблемная строка пропускается (но для KPI такое крайне маловероятно) |
-| Запись в staging | Сетевая ошибка, constraint violation | `AirflowFailException`, откат транзакции ADBC |
-| Atomic swap | Конфликт блокировок | Повтор через retry Airflow |
-| Watermark update | Нарушение уникальности | `AirflowFailException` |
-
-Все критические сбои приводят к падению задачи и сохранению предыдущего состояния Gold‑слоя.
+#### 6.4. Модуль `validators.py`
+- `validate_business_readiness` использует `lf.columns` для проверки схемы и `lf.select(pl.all().is_null().any())` для выявления NULL в ключах. Для диапазонов может вычислить min/max через частичную агрегацию (допустимо, т.к. не влечёт загрузку всех строк).
+- `validate_mart_before_publish` генерирует параметризованные SQL-запросы из `sql_templates.py` и выполняет их через `PostgresHook`.
 
 ---
 
-## 9. Масштабирование и производительность
+### 7. Обработка ошибок и идемпотентность
 
-- **Polars streaming:** Агрегации с группировкой по well_id, date используют `maintain_order=False` и streaming‑совместимые операции, чтобы не держать весь датасет в памяти.  
-- **ADBC ingestion:** Пакетная вставка через Arrow Flight работает на порядок быстрее классических INSERT.  
-- **PostgreSQL partitioning:** Таблицы Gold‑слоя партиционированы по `partition_date`, что ускоряет удаление старых партиций и запросы в Superset с фильтром по дате.  
-- **Параллелизм:** Каждая витрина строится в отдельной Airflow‑задаче, они могут выполняться параллельно (с учётом зависимостей, например mart_well_kpi ждёт mart_production). Настройка `pool` предотвращает перегрузку PostgreSQL.
+**Классификация ошибок:**
+- **CRITICAL:** нарушение контракта схемы, провал загрузки в staging, ошибка атомарного свопа. Приводят к немедленной остановке задачи (`AirflowFailException`) и запуску механизма повторных попыток (retries).
+- **HIGH:** обнаружение большого процента NULL (>5%), незначительные аномалии. Логируются в метаданные и observability-систему, но не останавливают пайплайн.
+- **LOW/MEDIUM:** предупреждения, записываемые в лог Airflow.
+
+**Идемпотентность достигается за счёт:**
+- Watermark-фильтра: повторный запуск с той же датой выполнения не найдёт новых партиций.
+- Атомарной замены: даже если staging-таблица уже содержит данные, операция удаляет старую партицию и вставляет новую, не создавая дубликатов.
+- Использования `INSERT INTO ... SELECT` вместо row-by-row, что исключает частичную вставку.
+
+**Восстановление после сбоя:**
+- Если упала запись в staging, транзакция ADBC автоматически откатывается, staging-таблица остаётся пустой (или в предыдущем состоянии, если использовалась временная).
+- Если упал atomic swap, транзакция откатывается, Gold-таблица не изменена.
+- Airflow гарантирует, что задача будет перезапущена до `retries` раз, после чего DAG помечается как failed и требует ручного вмешательства.
 
 ---
 
-## 10. Заключение
+### 8. Масштабирование
 
-Представленный DAG реализует полноценный **enterprise‑grade пайплайн** переноса данных из Silver в Gold, строго следуя медальонной архитектуре, принципам инкрементальной обработки и атомарной публикации. Все функции спроектированы с учётом будущего роста данных и требований BI/ML‑потребителей. Кодовая база разбита на изолированные модули, каждый из которых покрыт контрактами и допускает независимое тестирование и расширение.
+**Горизонтальное масштабирование (в будущем):**
+- Каждая витрина строится независимо, что позволяет в перспективе вынести их в отдельные DAGи или worker-ы Airflow.
+- Использование пула `gold_pool` предотвращает перегрузку PostgreSQL конкурентными записями.
 
+**Оптимизация работы с данными:**
+- Polars использует все доступные ядра CPU для параллельной обработки партиций.
+- `scan_parquet` с `predicate_pushdown` позволяет читать только релевантные колонки и строки, снижая объём ввода-вывода.
+- ADBC-драйвер передаёт данные в PostgreSQL в нативном Arrow-формате, минуя медленный ODBC/JDBC.
+
+**Рост объёмов телеметрии:**
+- Silver-данные уже партиционированы по дням, поэтому увеличение частоты поступления телеметрии не приводит к чтению лишних файлов.
+- Инкрементальный подход гарантирует, что время выполнения DAG зависит от объёма новых данных, а не от общего размера исторических данных.
+
+---
+
+### 9. Мониторинг и наблюдаемость
+
+**Метрики, доступные в Airflow:**
+- Длительность каждой задачи (`duration`).
+- Количество успешных/неудачных попыток.
+- SLA-пропуски (если DAG выполняется дольше 1 часа).
+
+**Кастомные метрики, публикуемые в метаданные:**
+- `processed_rows` – объём прочитанных из Silver строк.
+- `inserted_rows` – фактически записанных в staging строк.
+- `execution_time_sec` – время построения и загрузки конкретной витрины.
+
+**Логирование:**
+- Каждый модуль использует стандартный `logging` с указанием имени логгера.
+- Критические события (нарушение схемы, ошибки загрузки) пишутся с уровнем `ERROR` и дублируются в `etl_metadata`.
+- Предупреждения о статистических выбросах пишутся с уровнем `WARNING`.
+
+**Интеграция с внешними системами:**
+- Функция `publish_gold_layer_status` позволяет отправлять статус в корпоративный шину сообщений (например, Kafka) или писать в таблицу аудита, что может быть использовано для оповещения BI-команды об обновлении данных.
+
+---
+
+### 10. Заключение
+
+DAG `silver_to_gold_marts` представляет собой законченное, промышленное решение для построения аналитических витрин нефтедобывающей платформы. Он полностью отвечает требованиям:
+- **Enterprise-уровень:** строгая модульность, контракты, отказоустойчивость.
+- **Производительность:** Polars Lazy, ADBC, атомарные операции.
+- **Надёжность:** идемпотентность, восстановление после сбоев, отсутствие silent data corruption.
+- **Сопровождаемость:** изолированные функции, подробное логирование, метаданные.
