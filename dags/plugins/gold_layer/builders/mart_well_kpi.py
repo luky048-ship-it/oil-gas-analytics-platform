@@ -1,5 +1,6 @@
 import polars as pl
 from datetime import datetime
+from dags.plugins.gold_layer.config import ANALYSIS_PARAMS
 
 def build_mart_well_kpi(
     lf_mart_production: pl.LazyFrame,
@@ -7,16 +8,12 @@ def build_mart_well_kpi(
 ) -> pl.LazyFrame:
     """
     Builds mart_well_kpi LazyFrame.
-    - Concatenates current production batch with historical gold data for window calculations.
-    - Calculates rolling averages and cumulative totals.
-    - Ranks wells by production.
-    - Assigns performance groups.
     """
+    window = ANALYSIS_PARAMS["kpi_rolling_window"]
 
     # Combine history and new batch to ensure correct windowing
-    # We only need relevant columns for KPI
     combined = pl.concat([
-        lf_gold_history.select(lf_mart_production.columns),
+        lf_gold_history.select(lf_mart_production.collect_schema().names()),
         lf_mart_production
     ]).unique(subset=["well_id", "date"], keep="last")
 
@@ -25,16 +22,16 @@ def build_mart_well_kpi(
         combined
         .sort(["well_id", "date"])
         .with_columns([
-            pl.col("oil_ton").rolling_mean(window_size=7).over("well_id").alias("avg_daily_oil"),
+            pl.col("oil_ton").rolling_mean(window_size=window).over("well_id").alias("avg_daily_oil"),
             pl.col("oil_ton").cum_sum().over("well_id").alias("total_oil"),
-            pl.col("downtime_pct").rolling_mean(window_size=7).over("well_id").alias("avg_downtime_pct"),
-            pl.col("production_efficiency").rolling_mean(window_size=7).over("well_id").alias("avg_efficiency"),
+            pl.col("downtime_pct").rolling_mean(window_size=window).over("well_id").alias("avg_downtime_pct"),
+            pl.col("production_efficiency").rolling_mean(window_size=window).over("well_id").alias("avg_efficiency"),
             pl.col("oil_ton").max().over("well_id").alias("best_day_oil"),
             pl.col("oil_ton").min().over("well_id").alias("worst_day_oil")
         ])
     )
 
-    # 2. Ranking and Performance Groups (calculated per day)
+    # 2. Ranking and Performance Groups
     kpi_lf = (
         kpi_lf
         .with_columns(
@@ -54,8 +51,6 @@ def build_mart_well_kpi(
         pl.col("date").alias("partition_date")
     ])
 
-    # Return only the rows that were in the original new batch (based on date)
-    # Actually, we should return the entire set of dates present in lf_mart_production
     target_dates = lf_mart_production.select("date").unique()
 
     return (

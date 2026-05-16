@@ -1,6 +1,6 @@
 import polars as pl
 from datetime import datetime
-from dags.plugins.gold_layer.constants import Z_SCORE_THRESHOLD
+from dags.plugins.gold_layer.config import ANALYSIS_PARAMS
 
 def build_mart_failures(
     lf_sensors: pl.LazyFrame,
@@ -14,9 +14,10 @@ def build_mart_failures(
     - Joins with historical pump failures.
     - Calculates risk scores.
     """
+    threshold = ANALYSIS_PARAMS["z_score_threshold"]
+    risk_window = ANALYSIS_PARAMS["risk_rolling_window"]
 
     # 1. Z-Score Calculation (using window functions over pump_id)
-    # sensors: record_id, pump_id, timestamp, temperature, vibration, current, rpm, pressure
     enriched_sensors = (
         lf_sensors
         .with_columns([
@@ -29,11 +30,11 @@ def build_mart_failures(
 
     # 2. Anomaly Detection
     enriched_sensors = enriched_sensors.with_columns(
-        ( (pl.col("vibration_zscore").abs() > Z_SCORE_THRESHOLD) |
-          (pl.col("temperature_zscore").abs() > Z_SCORE_THRESHOLD) ).alias("is_anomaly")
+        ( (pl.col("vibration_zscore").abs() > threshold) |
+          (pl.col("temperature_zscore").abs() > threshold) ).alias("is_anomaly")
     ).with_columns(
-        pl.when(pl.col("vibration_zscore").abs() > Z_SCORE_THRESHOLD).then(pl.lit("High Vibration"))
-        .when(pl.col("temperature_zscore").abs() > Z_SCORE_THRESHOLD).then(pl.lit("High Temperature"))
+        pl.when(pl.col("vibration_zscore").abs() > threshold).then(pl.lit("High Vibration"))
+        .when(pl.col("temperature_zscore").abs() > threshold).then(pl.lit("High Temperature"))
         .otherwise(None)
         .alias("anomaly_reason")
     )
@@ -43,13 +44,10 @@ def build_mart_failures(
     )
 
     # 3. Join with Failures
-    # pump_failures: failure_id, pump_id, failure_date, failure_type, downtime_hours
-    # We join on date
     enriched_sensors = enriched_sensors.with_columns(
         pl.col("timestamp").dt.date().alias("date")
     )
 
-    # Prepare failures for joining (aggregate to pump_id, date if multiple exist)
     daily_failures = (
         lf_failures
         .with_columns(pl.col("failure_date").dt.date().alias("date"))
@@ -66,12 +64,12 @@ def build_mart_failures(
         .with_columns(pl.col("is_failure").fill_null(False))
     )
 
-    # 4. Risk Score (example logic: rolling mean of anomalies over 7 days)
+    # 4. Risk Score
     mart_lf = (
         mart_lf
         .sort(["pump_id", "timestamp"])
         .with_columns(
-            pl.col("is_anomaly").cast(pl.Int32).rolling_mean(window_size=7*24*60).over("pump_id").alias("risk_score") # assuming minute grain
+            pl.col("is_anomaly").cast(pl.Int32).rolling_mean(window_size=risk_window).over("pump_id").alias("risk_score")
         )
         .fill_null(0)
     )
@@ -81,7 +79,7 @@ def build_mart_failures(
         mart_lf
         .join(lf_pumps.select(["pump_id", "well_id"]), on="pump_id", how="left")
         .with_columns([
-            pl.lit(0.0).alias("failure_probability"), # Placeholder for ML model
+            pl.lit(0.0).alias("failure_probability"),
             pl.lit(datetime.now()).alias("load_timestamp"),
             pl.col("date").alias("partition_date")
         ])
