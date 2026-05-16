@@ -1,7 +1,7 @@
 import polars as pl
 import logging
 from typing import List
-from dags.plugins.gold_layer.config import MART_CONTRACTS
+from gold_layer.config import MART_CONTRACTS
 
 def validate_business_readiness(lf: pl.LazyFrame, mart_name: str) -> pl.LazyFrame:
     """

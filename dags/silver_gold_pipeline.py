@@ -3,15 +3,15 @@ from datetime import datetime, timedelta
 from airflow.decorators import dag, task, task_group
 from airflow.utils.task_group import TaskGroup
 
-from dags.plugins.gold_layer.watermarks import get_last_watermark, update_mart_watermark
-from dags.plugins.gold_layer.loaders import load_silver_dataset, discover_new_partitions, load_gold_dataset
-from dags.plugins.gold_layer.builders.mart_production import build_mart_production
-from dags.plugins.gold_layer.builders.mart_well_kpi import build_mart_well_kpi
-from dags.plugins.gold_layer.builders.mart_failures import build_mart_failures
-from dags.plugins.gold_layer.builders.mart_logistics import build_mart_logistics
-from dags.plugins.gold_layer.validators import validate_business_readiness, validate_mart_before_publish
-from dags.plugins.gold_layer.publishers import write_staging_mart, atomic_partition_overwrite, cleanup_staging
-from dags.plugins.gold_layer.constants import (
+from gold_layer.watermarks import get_last_watermark, update_mart_watermark
+from gold_layer.loaders import load_silver_dataset, discover_new_partitions, load_gold_dataset
+from gold_layer.builders.mart_production import build_mart_production
+from gold_layer.builders.mart_well_kpi import build_mart_well_kpi
+from gold_layer.builders.mart_failures import build_mart_failures
+from gold_layer.builders.mart_logistics import build_mart_logistics
+from gold_layer.validators import validate_business_readiness, validate_mart_before_publish
+from gold_layer.publishers import write_staging_mart, atomic_partition_overwrite, cleanup_staging
+from gold_layer.constants import (
     SILVER_PRODUCTION, SILVER_TELEMETRY, SILVER_TARGETS,
     SILVER_PUMP_SENSORS, SILVER_PUMP_FAILURES,
     SILVER_DELIVERIES, SILVER_DRIVERS, SILVER_VEHICLES,
@@ -30,7 +30,7 @@ default_args = {
 @dag(
     dag_id="silver_gold_pipeline",
     default_args=default_args,
-    schedule_interval="@daily",
+    schedule="@daily",
     catchup=False,
     tags=["gold", "production", "petroleum"]
 )

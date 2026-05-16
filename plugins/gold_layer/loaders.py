@@ -2,8 +2,8 @@ import polars as pl
 import logging
 from datetime import datetime, date
 from typing import List, Optional
-from dags.plugins.gold_layer.constants import SILVER_PREFIX
-from dags.plugins.gold_layer.connections import get_s3_fs
+from gold_layer.constants import SILVER_PREFIX
+from gold_layer.connections import get_s3_fs
 
 def load_silver_dataset(table_name: str, partition_dates: Optional[List[str]] = None) -> pl.LazyFrame:
     """
@@ -64,7 +64,7 @@ def load_gold_dataset(table_name: str) -> pl.LazyFrame:
     """
     Loads a Gold dataset from Postgres as a Polars LazyFrame.
     """
-    from dags.plugins.gold_layer.connections import get_postgres_uri
+    from gold_layer.connections import get_postgres_uri
     uri = get_postgres_uri()
     df = pl.read_database(f"SELECT * FROM {table_name}", connection=uri)
     return df.lazy()
