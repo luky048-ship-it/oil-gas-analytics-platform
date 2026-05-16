@@ -3,8 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from airflow import DAG
-from airflow.decorators import task
+from airflow.decorators import dag, task
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.task_group import TaskGroup
 from dq_utils.config import TABLE_CONTRACTS
@@ -19,10 +18,10 @@ from dq_utils.s3_utils import (discover_available_partitions,
 logger = logging.getLogger(__name__)
 
 
-@DAG(
+@dag(
     dag_id="dq_monitoring_pipeline",
     start_date=datetime(2025, 1, 1),
-    schedule_interval="@daily",
+    schedule="@daily",
     max_active_runs=1,
     catchup=True,
     default_args={

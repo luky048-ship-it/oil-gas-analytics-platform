@@ -2,9 +2,9 @@ import polars as pl
 import pyarrow as pa
 import logging
 from adbc_driver_postgresql import dbapi as adbc_dbapi
-from dags.plugins.gold_layer.connections import get_postgres_uri, get_psycopg2_conn
-from dags.plugins.gold_layer.constants import STAGING_SCHEMA
-from dags.plugins.gold_layer.sql_templates import (
+from gold_layer.connections import get_postgres_uri, get_psycopg2_conn
+from gold_layer.constants import STAGING_SCHEMA
+from gold_layer.sql_templates import (
     CREATE_STAGING_TABLE, DROP_STAGING_TABLE,
     DELETE_PARTITION_FROM_GOLD, INSERT_FROM_STAGING_TO_GOLD
 )

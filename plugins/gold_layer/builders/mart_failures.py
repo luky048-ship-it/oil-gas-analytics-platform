@@ -1,6 +1,6 @@
 import polars as pl
 from datetime import datetime
-from dags.plugins.gold_layer.config import ANALYSIS_PARAMS
+from gold_layer.config import ANALYSIS_PARAMS
 
 def build_mart_failures(
     lf_sensors: pl.LazyFrame,

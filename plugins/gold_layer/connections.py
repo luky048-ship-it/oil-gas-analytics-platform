@@ -3,7 +3,7 @@ import s3fs
 import psycopg2
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.providers.amazon.aws.hooks.base_aws import AwsGenericHook
-from dags.plugins.gold_layer.constants import POSTGRES_CONN_ID, AWS_CONN_ID
+from gold_layer.constants import POSTGRES_CONN_ID, AWS_CONN_ID
 
 def get_s3_fs() -> s3fs.S3FileSystem:
     """Returns a configured s3fs filesystem using Airflow AWS connection."""

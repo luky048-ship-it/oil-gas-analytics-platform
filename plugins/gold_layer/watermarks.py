@@ -1,8 +1,8 @@
 import logging
 from datetime import datetime, date
 from typing import Optional, List
-from dags.plugins.gold_layer.connections import get_psycopg2_conn
-from dags.plugins.gold_layer.constants import TABLE_METADATA_WATERMARKS
+from gold_layer.connections import get_psycopg2_conn
+from gold_layer.constants import TABLE_METADATA_WATERMARKS
 
 def get_last_watermark(mart_name: str) -> Optional[date]:
     """Retrieves the latest processed partition date for a given mart."""

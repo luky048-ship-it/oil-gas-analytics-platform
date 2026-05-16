@@ -42,7 +42,7 @@ DEFAULT_ARGS = {
 
 with DAG(
     dag_id="bronze_to_silver_pipeline",
-    schedule_interval="@daily",
+    schedule="@daily",
     start_date=datetime(2024, 1, 1),
     catchup=True,
     max_active_runs=1,
