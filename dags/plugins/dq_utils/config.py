@@ -15,10 +15,6 @@ class ForeignKeyContract:
 
 @dataclass
 class TableContract:
-    """
-    Enterprise Schema Contract definition for Data Quality monitoring.
-    Represents physical schema, business rules, referential integrity, and SLAs.
-    """
 
     schema: Dict[str, pl.DataType]
     primary_keys: List[str]
@@ -78,17 +74,10 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "status": pl.String(),
         },
         primary_keys=["well_id"],
-        not_null_columns=[
-            "well_id",
-            "name",
-            "field_name",
-            "region",
-            "start_date",
-            "status",
-        ],
+        not_null_columns=["well_id", "name"],
         enums={"status": APPROVED_WELL_STATUSES},
         custom_rules=["start_date <= current_date"],
-        freshness_sla_minutes=1440,  # 24h
+        freshness_sla_minutes=1440,
         partition_column=None,
     ),
     "production": TableContract(
@@ -96,16 +85,16 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "prod_id": pl.Int32(),
             "well_id": pl.Int32(),
             "date": pl.Date(),
-            "oil_ton": pl.Float64(),
-            "gas_m3": pl.Float64(),
-            "water_m3": pl.Float64(),
-            "energy_kwh": pl.Float64(),
-            "downtime_hours": pl.Float64(),
-            "temperature": pl.Float64(),
-            "pressure": pl.Float64(),
+            "oil_ton": pl.Decimal(10, 2),  # вместо Float64
+            "gas_m3": pl.Decimal(12, 2),
+            "water_m3": pl.Decimal(12, 2),
+            "energy_kwh": pl.Decimal(12, 2),
+            "downtime_hours": pl.Decimal(5, 2),
+            "temperature": pl.Decimal(5, 2),
+            "pressure": pl.Decimal(5, 2),
         },
         primary_keys=["prod_id"],
-        not_null_columns=["prod_id", "well_id", "date"],
+        not_null_columns=["prod_id", "date"],
         foreign_keys=[ForeignKeyContract("well_id", "wells", "well_id")],
         value_ranges={
             "oil_ton": (0.0, None),
@@ -116,7 +105,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "pressure": (0.0, 1000.0),
             "temperature": (-60.0, 250.0),
         },
-        freshness_sla_minutes=1440,  # 24h
+        freshness_sla_minutes=1440,  # 24 h
         partition_column="date",
         statistical_monitored_columns=["oil_ton", "gas_m3", "water_m3"],
     ),
@@ -124,17 +113,17 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
         schema={
             "record_id": pl.Int32(),
             "well_id": pl.Int32(),
-            "timestamp": pl.Datetime("ms"),
-            "pump_speed_rpm": pl.Float64(),
-            "pump_current": pl.Float64(),
-            "pressure_in": pl.Float64(),
-            "pressure_out": pl.Float64(),
-            "temperature": pl.Float64(),
-            "vibration": pl.Float64(),
-            "oil_flow_rate": pl.Float64(),
+            "timestamp": pl.Datetime("us"),  # унифицировать с ETL (секунды)
+            "pump_speed_rpm": pl.Decimal(8, 2),
+            "pump_current": pl.Decimal(8, 2),
+            "pressure_in": pl.Decimal(8, 2),
+            "pressure_out": pl.Decimal(8, 2),
+            "temperature": pl.Decimal(5, 2),
+            "vibration": pl.Decimal(5, 2),
+            "oil_flow_rate": pl.Decimal(8, 2),
         },
         primary_keys=["record_id"],
-        not_null_columns=["record_id", "well_id", "timestamp"],
+        not_null_columns=["record_id"],  # только PK (well_id и timestamp NULL в DDL)
         foreign_keys=[ForeignKeyContract("well_id", "wells", "well_id")],
         value_ranges={
             "pump_speed_rpm": (0.0, None),
@@ -142,7 +131,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "oil_flow_rate": (0.0, None),
         },
         custom_rules=["pressure_out >= pressure_in"],
-        freshness_sla_minutes=10,  # 10 minutes late arrival window
+        freshness_sla_minutes=10,
         partition_column="event_date",
         statistical_monitored_columns=["vibration", "temperature", "oil_flow_rate"],
     ),
@@ -152,8 +141,8 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "date": pl.Date(),
             "daily_oil_ton": pl.Float64(),
         },
-        primary_keys=["well_id", "date"],
-        not_null_columns=["well_id", "date", "daily_oil_ton"],
+        primary_keys=[],
+        not_null_columns=[],
         foreign_keys=[ForeignKeyContract("well_id", "wells", "well_id")],
         value_ranges={"daily_oil_ton": (0.0, None)},
     ),
@@ -167,7 +156,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "model": pl.String(),
         },
         primary_keys=["pump_id"],
-        not_null_columns=["pump_id", "well_id", "type", "install_date"],
+        not_null_columns=["pump_id"],
         foreign_keys=[ForeignKeyContract("well_id", "wells", "well_id")],
         custom_rules=["install_date <= current_date"],
     ),
@@ -175,22 +164,22 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
         schema={
             "record_id": pl.Int32(),
             "pump_id": pl.Int32(),
-            "timestamp": pl.Datetime("ms"),
-            "temperature": pl.Float64(),
-            "vibration": pl.Float64(),
-            "current": pl.Float64(),
-            "rpm": pl.Float64(),
-            "pressure": pl.Float64(),
+            "timestamp": pl.Datetime("us"),
+            "temperature": pl.Decimal(5, 2),
+            "vibration": pl.Decimal(5, 2),
+            "current": pl.Decimal(8, 2),
+            "rpm": pl.Decimal(8, 2),
+            "pressure": pl.Decimal(8, 2),
         },
         primary_keys=["record_id"],
-        not_null_columns=["record_id", "pump_id", "timestamp"],
+        not_null_columns=["record_id"],
         foreign_keys=[ForeignKeyContract("pump_id", "pumps", "pump_id")],
         value_ranges={
             "vibration": (0.0, None),
             "rpm": (0.0, None),
             "pressure": (0.0, None),
         },
-        freshness_sla_minutes=5,  # 5 min late events
+        freshness_sla_minutes=5,
         partition_column="event_date",
         statistical_monitored_columns=["vibration", "rpm", "temperature"],
     ),
@@ -198,12 +187,12 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
         schema={
             "failure_id": pl.Int32(),
             "pump_id": pl.Int32(),
-            "failure_date": pl.Datetime("ms"),
+            "failure_date": pl.Datetime("us"),
             "failure_type": pl.String(),
-            "downtime_hours": pl.Float64(),
+            "downtime_hours": pl.Decimal(5, 2),
         },
         primary_keys=["failure_id"],
-        not_null_columns=["failure_id", "pump_id", "failure_date", "failure_type"],
+        not_null_columns=["failure_id"],
         foreign_keys=[ForeignKeyContract("pump_id", "pumps", "pump_id")],
         value_ranges={"downtime_hours": (0.0, None)},
         enums={"failure_type": APPROVED_FAILURE_TYPES},
@@ -216,24 +205,16 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "source": pl.String(),
             "destination": pl.String(),
             "product_type": pl.String(),
-            "volume_ton": pl.Float64(),
-            "cost_usd": pl.Float64(),
-            "delay_hours": pl.Float64(),
-            "distance_km": pl.Float64(),
+            "volume_ton": pl.Decimal(10, 2),
+            "cost_usd": pl.Decimal(10, 2),
+            "delay_hours": pl.Decimal(6, 2),
+            "distance_km": pl.Decimal(8, 2),
             "weather_conditions": pl.String(),
             "driver_id": pl.Int32(),
             "vehicle_id": pl.Int32(),
         },
         primary_keys=["delivery_id"],
-        not_null_columns=[
-            "delivery_id",
-            "date",
-            "source",
-            "destination",
-            "product_type",
-            "driver_id",
-            "vehicle_id",
-        ],
+        not_null_columns=["delivery_id"],
         foreign_keys=[
             ForeignKeyContract("driver_id", "drivers", "driver_id"),
             ForeignKeyContract("vehicle_id", "vehicles", "vehicle_id"),
@@ -255,20 +236,20 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "region": pl.String(),
         },
         primary_keys=["driver_id"],
-        not_null_columns=["driver_id", "name"],
+        not_null_columns=["driver_id"],
         value_ranges={"experience_years": (0.0, 60.0)},
     ),
     "vehicles": TableContract(
         schema={
             "vehicle_id": pl.Int32(),
             "plate_number": pl.String(),
-            "capacity_ton": pl.Float64(),
+            "capacity_ton": pl.Decimal(8, 2),
             "fuel_type": pl.String(),
         },
         primary_keys=["vehicle_id"],
-        not_null_columns=["vehicle_id", "plate_number"],
+        not_null_columns=["vehicle_id"],
         unique_columns=["plate_number"],
-        value_ranges={"capacity_ton": (0.0001, None)},  # > 0 constraint
+        value_ranges={"capacity_ton": (0.0001, None)},
         enums={"fuel_type": APPROVED_FUEL_TYPES},
     ),
     "oil_stations": TableContract(
@@ -280,7 +261,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "oil_flow_per_day": pl.Float64(),
         },
         primary_keys=["station_id"],
-        not_null_columns=["station_id", "station_name", "latitude", "longitude"],
+        not_null_columns=["station_id"],
         value_ranges={
             "latitude": (-90.0, 90.0),
             "longitude": (-180.0, 180.0),
