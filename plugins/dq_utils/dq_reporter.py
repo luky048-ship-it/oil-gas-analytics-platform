@@ -25,7 +25,7 @@ class DQResult:
 def persist_dq_results(
     results: List[Dict[str, Any]],
     execution_date: str,
-    postgres_conn_id: str = "postgres_metadata",
+    postgres_conn_id: str = "postgres_default",
 ) -> None:
     if not results:
         return

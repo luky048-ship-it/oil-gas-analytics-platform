@@ -13,7 +13,7 @@ def publish_pipeline_status(
     dataset: str,
     execution_date: str,
     status: str,
-    postgres_conn_id: str = "postgres_metadata",
+    postgres_conn_id: str = "postgres_default",
 ) -> None:
     """
     Publishes the final pipeline status to the etl_metadata schema.

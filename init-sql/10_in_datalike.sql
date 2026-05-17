@@ -17,3 +17,27 @@ CREATE TABLE IF NOT EXISTS etl_metadata.marts_loaded_partitions (
     PRIMARY KEY (mart_name, partition_date)
 );
 
+
+CREATE TABLE IF NOT EXISTS etl_metadata.dq_validation_results (
+    dataset VARCHAR(255),
+    validation_type VARCHAR(255),
+    partition_date DATE,
+    execution_date DATE,
+    status VARCHAR(50),
+    failed_rows BIGINT,
+    checked_rows BIGINT,
+    message TEXT,
+    created_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY (dataset, validation_type, partition_date, execution_date)
+);
+
+CREATE TABLE IF NOT EXISTS etl_metadata.dq_pipeline_runs (
+    dataset VARCHAR(255),
+    partition_date DATE,
+    execution_date DATE,
+    status VARCHAR(50),
+    created_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE,
+    PRIMARY KEY (dataset, partition_date)
+);

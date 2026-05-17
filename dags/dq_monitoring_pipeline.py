@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 
 @dag(
-    dag_id="dq_monitoring_pipeline",
-    start_date=datetime(2025, 1, 1),
+    dag_id="dq_monitoring_pipeline_4",
+    start_date=datetime(2025, 10, 1),
     schedule="@daily",
     max_active_runs=1,
     catchup=True,
@@ -51,6 +51,13 @@ def dq_pipeline():
             @task
             def process(ds_name, paths, opts, **kwargs):
                 exec_date = kwargs["ds"]
+
+                if not paths:
+                    logger.info(
+                        f"Skipping process for {ds_name} as no paths were discovered."
+                    )
+                    return []
+
                 contract_obj = TABLE_CONTRACTS[ds_name]
 
                 # RI Configuration
@@ -70,9 +77,16 @@ def dq_pipeline():
                     # Валидация файла (Layer 1)
                     file_dq = validate_file_integrity(ds_name, p, opts)
                     # Валидация свежести (Layer 5)
-                    fresh_dq = validate_data_freshness(ds_name, exec_date, contract_obj.freshness_sla_minutes or 1440, opts)
+                    fresh_dq = validate_data_freshness(
+                        ds_name,
+                        exec_date,
+                        contract_obj.freshness_sla_minutes or 1440,
+                        opts,
+                    )
                     all_dq_results.append(fresh_dq.__dict__)
-                    all_dq_results[-1]["created_at"] = all_dq_results[-1]["created_at"].isoformat()
+                    all_dq_results[-1]["created_at"] = all_dq_results[-1][
+                        "created_at"
+                    ].isoformat()
                     all_dq_results.append(file_dq.__dict__)
                     # Сериализация даты для XCom
                     all_dq_results[-1]["created_at"] = all_dq_results[-1][

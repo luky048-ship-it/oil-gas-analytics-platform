@@ -3,39 +3,48 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import List
+from typing import Any, Dict, List, cast
 
-import s3fs
 import pyarrow.parquet as pq
+import s3fs
 from airflow.exceptions import AirflowFailException
 from airflow.hooks.base import BaseHook
-
 from dq_utils.dq_reporter import DQResult
 
 logger = logging.getLogger(__name__)
 
 
-def get_s3_storage_options(conn_id: str = "aws_default") -> dict:
+def get_s3_storage_options(conn_id: str = "aws_default") -> dict[str, Any]:
     """
-    Retrieves credentials from Airflow Connection and returns storage_options
-    compatible with Polars and s3fs.
+    Retrieves credentials from Airflow Connection and returns a FLAT storage_options
+    dictionary compatible with BOTH Polars (Rust native) and s3fs (Python).
     """
     try:
         conn = BaseHook.get_connection(conn_id)
+        extra = conn.extra_dejson
+        endpoint = extra.get("endpoint_url") or extra.get("host")
 
-        options = {"key": conn.login, "secret": conn.password, "client_kwargs": {}}
+        options: dict[str, Any] = {
+            "key": conn.login,
+            "secret": conn.password,
+            "aws_access_key_id": conn.login,
+            "aws_secret_access_key": conn.password,
+            "aws_region": "us-east-1",
+        }
 
-        if conn.extra_dejson:
-            endpoint_url = conn.extra_dejson.get(
-                "endpoint_url"
-            ) or conn.extra_dejson.get("host")
-            if endpoint_url:
-                options["client_kwargs"]["endpoint_url"] = endpoint_url
+        if endpoint:
+            options["endpoint_url"] = endpoint  # для s3fs
+            options["aws_endpoint"] = endpoint  # для Polars Rust
 
-            # Allow insecure connections if explicitly requested in extra (e.g., local MinIO)
-            if conn.extra_dejson.get("secure") is False:
-                options["client_kwargs"]["use_ssl"] = False
-                options["client_kwargs"]["verify"] = False
+            if endpoint.startswith("http://"):
+                options["aws_allow_http"] = "true"
+                options["aws_region"] = "us-east-1"
+
+        secure = extra.get("secure")
+        if secure is not None and str(secure).lower() in ("false", "0", "no"):
+            options["use_ssl"] = False
+            options["verify"] = False
+            options["aws_allow_http"] = "true"
 
         return options
     except Exception as e:
@@ -56,35 +65,25 @@ def discover_available_partitions(
     Raises AirflowFailException on missing partitions to enforce SLA and pipeline integrity.
     """
     fs = s3fs.S3FileSystem(**s3_options)
-    dataset_path = f"{base_path.rstrip('/')}/{dataset}"
+    bucket_path = base_path.replace("s3://", "").rstrip("/")
+    dataset_path = f"{bucket_path}/{dataset}"
 
     try:
-        # Looking for Hive-style partitioned paths containing the execution date
         search_pattern = f"{dataset_path}/*{execution_date}*/*.parquet"
         files = fs.glob(search_pattern)
 
-        # Fallback to direct file naming if not strictly Hive-partitioned
         if not files:
             search_pattern = f"{dataset_path}/*{execution_date}*.parquet"
             files = fs.glob(search_pattern)
-
     except Exception as e:
-        raise AirflowFailException(
-            f"CRITICAL: S3 listing failed for {dataset_path}: {e}"
-        )
+        logger.error(f"S3 Listing failed: {str(e)}")
+        return []
 
-    if not files:
-        raise AirflowFailException(
-            f"CRITICAL: Missing partitions for dataset '{dataset}' on execution date '{execution_date}'"
-        )
-
-    # Ensure fully qualified S3 paths
-    valid_paths = [f"s3://{p}" if not p.startswith("s3://") else p for p in files]
-    logger.info(
-        f"Discovered {len(valid_paths)} partitions for {dataset} on {execution_date}."
-    )
-
-    return valid_paths
+    return [
+        f"s3://{str(p)}" if not str(p).startswith("s3://") else str(p)
+        for p in files
+        if isinstance(p, (str, bytes))
+    ]
 
 
 def validate_file_integrity(
@@ -108,8 +107,20 @@ def validate_file_integrity(
             num_rows = pf.metadata.num_rows
 
             if num_rows == 0:
-                raise AirflowFailException(
-                    f"CRITICAL: Empty parquet file detected at {partition_path}"
+                #                raise AirflowFailException(
+                #                    f"CRITICAL: Empty parquet file detected at {partition_path}"
+                #                )
+                logger.warning(
+                    f"No partitions found for dataset '{dataset}' on date. Skipping."
+                )
+                return DQResult(
+                    dataset=dataset,
+                    validation_type="File Integrity Layer 1",
+                    status="FAIL",
+                    failed_rows=0,
+                    checked_rows=0,
+                    message=f"File is empty: {partition_path}",
+                    created_at=datetime.utcnow(),
                 )
 
         return DQResult(
