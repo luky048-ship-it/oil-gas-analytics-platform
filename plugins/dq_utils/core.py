@@ -6,10 +6,10 @@ from typing import Any, Dict, List, Tuple
 
 import polars as pl
 
+from dq_utils.business_validator import (validate_business_rules,
+                                         validate_duplicate_keys,
+                                         validate_null_thresholds)
 from dq_utils.dq_reporter import DQResult
-from dq_utils.business_validator import (validate_null_thresholds,
-                                        validate_duplicate_keys,
-                                        validate_business_rules)
 from dq_utils.statistical_validator import validate_distribution_drift
 
 logger = logging.getLogger(__name__)
@@ -45,18 +45,27 @@ def execute_dq_pipeline(
 
     # Layer 7: Completeness (Nulls and Duplicates)
     # We pass 0.0 threshold for mandatory columns to detect ANY nulls
-    results_obj.append(validate_null_thresholds(lf, dataset, {c: 0.0 for c in business_rules_config.get("not_null_columns", [])}))
+    results_obj.append(
+        validate_null_thresholds(
+            lf,
+            dataset,
+            {c: 0.0 for c in business_rules_config.get("not_null_columns", [])},
+        )
+    )
     results_obj.append(validate_duplicate_keys(lf, dataset, key_columns))
 
     # Layer 6: Statistical Drift (if stats provided)
     stats_cols = business_rules_config.get("statistical_monitored_columns", [])
     if stats_cols and historical_stats:
-        results_obj.extend(validate_distribution_drift(lf, dataset, stats_cols, historical_stats))
+        results_obj.extend(
+            validate_distribution_drift(lf, dataset, stats_cols, historical_stats)
+        )
 
     rule_exprs: Dict[str, pl.Expr] = {}
 
     # 2. Referential Integrity (Anti-Join) with Flag logic for splitting
     import s3fs
+
     fs = s3fs.S3FileSystem(**s3_options)
 
     for join in parent_joins:
@@ -112,15 +121,19 @@ def execute_dq_pipeline(
     for name in rule_exprs.keys():
         col_name = f"__is_valid_{name}"
         failed_count = df.filter(~pl.col(col_name)).height
-        final_results.append({
-            "dataset": dataset,
-            "validation_type": f"Row-Level: {name}",
-            "status": "FAIL" if failed_count > 0 else "PASS",
-            "failed_rows": failed_count,
-            "checked_rows": df.height,
-            "message": f"Failed {failed_count} rows" if failed_count > 0 else "Passed",
-            "created_at": created_at,
-        })
+        final_results.append(
+            {
+                "dataset": dataset,
+                "validation_type": f"Row-Level: {name}",
+                "status": "FAIL" if failed_count > 0 else "PASS",
+                "failed_rows": failed_count,
+                "checked_rows": df.height,
+                "message": (
+                    f"Failed {failed_count} rows" if failed_count > 0 else "Passed"
+                ),
+                "created_at": created_at,
+            }
+        )
 
     # Ensure all created_at are serialized
     for r in final_results:

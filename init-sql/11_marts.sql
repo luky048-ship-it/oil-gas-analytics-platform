@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS gold.mart_production (
     partition_date          DATE GENERATED ALWAYS AS (date) STORED
 );
 
-COMMENT ON TABLE gold.mart_production IS 'Основная производственная витрина (день × скважина)';
+COMMENT ON TABLE gold.mart_production IS 'Основная производственная витрина';
 
 -- Индексы
 CREATE INDEX IF NOT EXISTS idx_mart_prod_well_date ON gold.mart_production (well_id, date);

@@ -205,11 +205,23 @@ services:
   airflow-init:
     <<: *airflow-common
     container_name: pipeline_airflow_init
-    command: version
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "Running database migration..."
+        airflow db migrate || airflow db init
+        echo "Creating admin user..."
+        airflow users create \
+          --username "${_AIRFLOW_WWW_USER_USERNAME:-admin}" \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password "${_AIRFLOW_WWW_USER_PASSWORD:-admin}" || true
+        echo "Initialization complete."    
     environment:
       <<: *airflow-env
-      _AIRFLOW_DB_MIGRATE: 'true'
-      _AIRFLOW_WWW_USER_CREATE: 'true'
       _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME}
       _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD}
 
@@ -223,8 +235,6 @@ services:
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MINIO_ENDPOINT: http://minio:9000
       MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET}
-
-    user: "0:0"
     depends_on:
       postgres:
         condition: service_healthy
