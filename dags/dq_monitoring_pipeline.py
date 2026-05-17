@@ -13,13 +13,14 @@ from dq_utils.freshness_validator import validate_data_freshness
 from dq_utils.pipeline_status import publish_pipeline_status
 from dq_utils.quarantine_writer import write_quarantine_dataset
 from dq_utils.s3_utils import (discover_available_partitions,
-                               get_s3_storage_options, validate_file_integrity)
+                               get_s3_storage_options, get_s3fs_client,
+                               validate_file_integrity)
 
 logger = logging.getLogger(__name__)
 
 
 @dag(
-    dag_id="dq_monitoring_pipeline_4",
+    dag_id="dq_monitoring_pipeline_5",
     start_date=datetime(2025, 10, 1),
     schedule="@daily",
     max_active_runs=1,
@@ -41,12 +42,16 @@ def dq_pipeline():
 
     s3_opts = get_s3_opts()
 
+    task_groups = {}
+
     for dataset_name, contract in TABLE_CONTRACTS.items():
         with TaskGroup(group_id=f"dq_{dataset_name}") as tg:
 
             @task
             def discover(ds_name, opts, **kwargs):
-                return discover_available_partitions(ds_name, kwargs["ds"], opts)
+                return discover_available_partitions(
+                    ds_name, kwargs["ds"], opts, base_path="s3://datalake/silver"
+                )
 
             @task
             def process(ds_name, paths, opts, **kwargs):
@@ -54,7 +59,7 @@ def dq_pipeline():
 
                 if not paths:
                     logger.info(
-                        f"Skipping process for {ds_name} as no paths were discovered."
+                        f"Skipping process for {ds_name} as no paths were discovered in Silver."
                     )
                     return []
 
@@ -74,26 +79,23 @@ def dq_pipeline():
                 all_dq_results = []
 
                 for p in paths:
-                    # Валидация файла (Layer 1)
                     file_dq = validate_file_integrity(ds_name, p, opts)
-                    # Валидация свежести (Layer 5)
                     fresh_dq = validate_data_freshness(
                         ds_name,
                         exec_date,
                         contract_obj.freshness_sla_minutes or 1440,
                         opts,
+                        base_path="s3://datalake/silver",  # Проверяем свежесть в Silver
                     )
                     all_dq_results.append(fresh_dq.__dict__)
                     all_dq_results[-1]["created_at"] = all_dq_results[-1][
                         "created_at"
                     ].isoformat()
                     all_dq_results.append(file_dq.__dict__)
-                    # Сериализация даты для XCom
                     all_dq_results[-1]["created_at"] = all_dq_results[-1][
                         "created_at"
                     ].isoformat()
 
-                    # Основной процессинг (Layer 2-4, 7)
                     results, v_df, inv_df = execute_dq_pipeline(
                         dataset=ds_name,
                         partition_path=p,
@@ -114,16 +116,6 @@ def dq_pipeline():
 
                     all_dq_results.extend(results)
 
-                    # Запись Silver (Используем pyarrow_options для S3)
-                    if v_df.height > 0:
-                        target = f"s3://datalake/silver/{ds_name}/partition_date={exec_date}/data.parquet"
-                        v_df.write_parquet(
-                            target,
-                            use_pyarrow=True,
-                            pyarrow_options={"storage_options": opts},
-                        )
-
-                    # Запись Quarantine
                     if inv_df.height > 0:
                         write_quarantine_dataset(
                             inv_df, ds_name, "core_dq", exec_date, opts
@@ -138,20 +130,22 @@ def dq_pipeline():
             @task(trigger_rule="all_done")
             def status(ds_name, **kwargs):
                 ti = kwargs["ti"]
-                # Проверка статуса таски process в этой группе
-                state = (
-                    "SUCCESS"
-                    if ti.xcom_pull(task_ids=f"{tg.group_id}.process")
-                    else "FAILED"
-                )
+                process_result = ti.xcom_pull(task_ids=f"{tg.group_id}.process")
+                state = "SUCCESS" if process_result is not None else "FAILED"
                 publish_pipeline_status(ds_name, kwargs["ds"], state)
 
-            # Flow
             p_list = discover(dataset_name, s3_opts)
             dq_data = process(dataset_name, p_list, s3_opts)
             report(dataset_name, dq_data) >> status(dataset_name)
 
-        start >> s3_opts >> tg >> finish
+        task_groups[dataset_name] = tg
+
+    for dataset_name, contract in TABLE_CONTRACTS.items():
+        start >> s3_opts >> task_groups[dataset_name] >> finish
+
+        for fk in contract.foreign_keys:
+            if fk.parent_table in task_groups:
+                task_groups[fk.parent_table] >> task_groups[dataset_name]
 
 
 dq_pipeline()

@@ -615,7 +615,7 @@ default_args = {
 }
 
 with DAG(
-    dag_id="postgres_to_minio_enterprise_2",
+    dag_id="postgres_to_minio",
     default_args=default_args,
     schedule="@daily",
     start_date=datetime(2025, 10, 1),

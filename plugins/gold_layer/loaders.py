@@ -1,70 +1,109 @@
-import polars as pl
 import logging
-from datetime import datetime, date
+from datetime import date, datetime
 from typing import List, Optional
-from gold_layer.constants import SILVER_PREFIX
-from gold_layer.connections import get_s3_fs
 
-def load_silver_dataset(table_name: str, partition_dates: Optional[List[str]] = None) -> pl.LazyFrame:
+import polars as pl
+from gold_layer.connections import get_psycopg2_conn, get_s3_fs
+from gold_layer.constants import S3_BUCKET, SILVER_PREFIX
+
+
+def discover_new_partitions(
+    table_name: str, last_watermark: Optional[date]
+) -> List[str]:
+    query = """
+        SELECT partition_date 
+        FROM etl_metadata.dq_pipeline_runs 
+        WHERE dataset = %s 
+          AND status = 'SUCCESS'
     """
-    Loads a Silver dataset as a Polars LazyFrame.
-    If partition_dates is provided, it filters by partition_date.
-    Uses scan_parquet for efficiency.
-    """
+    params = [table_name]
+
+    if last_watermark:
+        query += " AND partition_date > %s"
+        params.append(last_watermark)
+
+    query += " ORDER BY partition_date ASC;"
+
+    new_dates = []
+    with get_psycopg2_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, tuple(params))
+            results = cur.fetchall()
+            for row in results:
+                # row[0] is a datetime.date object
+                new_dates.append(row[0].strftime("%Y-%m-%d"))
+
+    if new_dates:
+        logging.info(
+            f"[{table_name}] Discovered {len(new_dates)} DQ-validated partitions: {new_dates}"
+        )
+    else:
+        logging.info(f"[{table_name}] No new DQ-validated partitions found.")
+
+    return new_dates
+
+
+def load_silver_dataset(
+    table_name: str,
+    partition_dates: Optional[List[str]] = None,
+    pk_columns: Optional[List[str]] = None,
+) -> pl.LazyFrame:
     fs = get_s3_fs()
     base_path = f"{SILVER_PREFIX}/{table_name}"
+    quarantine_base = f"s3://{S3_BUCKET}/quarantine/{table_name}"
 
-    # We use glob pattern to scan all partitions if no specific dates are provided
-    # Structure: silver/{table_name}/partition_date=YYYY-MM-DD/*.parquet
-    if partition_dates:
-        paths = [f"{base_path}/partition_date={dt}/*.parquet" for dt in partition_dates]
-        # Check which paths actually exist to avoid Polars error
-        existing_paths = []
-        for p in paths:
-            if fs.glob(p.replace("s3://", "")):
-                existing_paths.append(p)
-
-        if not existing_paths:
-            logging.warning(f"No parquet files found for {table_name} in partitions {partition_dates}")
-            return pl.LazyFrame()
-
-        return pl.scan_parquet(existing_paths, storage_options=fs.storage_options)
-    else:
+    if not partition_dates:
         path = f"{base_path}/**/*.parquet"
         return pl.scan_parquet(path, storage_options=fs.storage_options)
 
-def discover_new_partitions(table_name: str, last_watermark: Optional[date]) -> List[str]:
-    """
-    Lists directories in S3 and returns partition dates that are newer than last_watermark.
-    """
-    fs = get_s3_fs()
-    base_path = f"{SILVER_PREFIX.replace('s3://', '')}/{table_name}"
+    # 1. Формируем пути для Silver
+    silver_paths = []
+    for dt in partition_dates:
+        p = f"{base_path}/partition_date={dt}/*.parquet"
+        if fs.glob(p.replace("s3://", "")):
+            silver_paths.append(p)
 
-    try:
-        partition_dirs = fs.ls(base_path)
-    except FileNotFoundError:
-        logging.error(f"Silver table {table_name} not found at {base_path}")
-        return []
+    if not silver_paths:
+        logging.warning(f"No Silver files found for {table_name} in {partition_dates}")
+        return pl.LazyFrame()
 
-    new_dates = []
-    for d in partition_dirs:
-        # Expected format: silver/table/partition_date=YYYY-MM-DD
-        if "partition_date=" in d:
-            date_str = d.split("partition_date=")[-1]
-            try:
-                dt = datetime.strptime(date_str, "%Y-%m-%d").date()
-                if last_watermark is None or dt > last_watermark:
-                    new_dates.append(date_str)
-            except ValueError:
-                continue
+    lf_silver = pl.scan_parquet(silver_paths, storage_options=fs.storage_options)
 
-    return sorted(new_dates)
+    # 2. Если не переданы ключи для Anti-Join, возвращаем Silver как есть
+    if not pk_columns:
+        return lf_silver
+
+    # 3. Ищем Карантинные файлы для этих же дат
+    quarantine_paths = []
+    for dt in partition_dates:
+        q_p = f"{quarantine_base}/partition_date={dt}/*.parquet"
+        if fs.glob(q_p.replace("s3://", "")):
+            quarantine_paths.append(q_p)
+
+    # 4. Если есть карантин, делаем Anti-Join
+    if quarantine_paths:
+        lf_quarantine = pl.scan_parquet(
+            quarantine_paths, storage_options=fs.storage_options
+        )
+
+        # Вычитаем карантин из Silver
+        lf_clean = lf_silver.join(
+            lf_quarantine.select(pk_columns), on=pk_columns, how="anti"
+        )
+        logging.info(
+            f"[{table_name}] Applied Quarantine Anti-Join on keys {pk_columns}"
+        )
+        return lf_clean
+
+    return lf_silver
+
 
 def load_gold_dataset(table_name: str) -> pl.LazyFrame:
     """
     Loads a Gold dataset from Postgres as a Polars LazyFrame.
     """
     from gold_layer.connections import get_postgres_uri
+
     uri = get_postgres_uri()
-    df = pl.read_database(f"SELECT * FROM {table_name}", connection=uri)
+    df = pl.read_database(query=f"SELECT * FROM {table_name}", connection=uri)
     return df.lazy()

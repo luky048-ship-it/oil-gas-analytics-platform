@@ -1,6 +1,6 @@
 # plugins/bronze_to_silver/schema_validator.py
 import logging
-from typing import Dict, Any
+from typing import Any, Dict
 
 import polars as pl
 from airflow.exceptions import AirflowFailException
@@ -11,12 +11,7 @@ logger = logging.getLogger(__name__)
 def validate_dataset_schema(
     lf: pl.LazyFrame, dataset: str, expected_schema: Dict[str, pl.DataType]
 ) -> None:
-    """
-    Validates the schema of the incoming Bronze LazyFrame against the contract.
-    Fails the pipeline if mandatory columns are missing or types are strictly incompatible.
-    Logs warnings for new unexpected columns (schema drift).
-    """
-    actual_schema = lf.schema
+    actual_schema = lf.collect_schema()
 
     missing_columns = []
     type_mismatches = []

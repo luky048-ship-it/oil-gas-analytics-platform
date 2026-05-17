@@ -5,6 +5,7 @@ import logging
 from typing import Optional
 
 import polars as pl
+from dq_utils.s3_utils import get_s3fs_client
 
 logger = logging.getLogger(__name__)
 
@@ -17,20 +18,12 @@ def write_quarantine_dataset(
     s3_options: dict,
     base_path: str = "s3://datalake/quarantine",
 ) -> Optional[str]:
-    """
-    Writes invalid records to the Quarantine Zone in S3.
-    Enforces isolation of bad data and appends validation metadata for auditing.
-    Idempotent operation: overwrites the specific partition file for the run.
-
-    Path format: s3://datalake/quarantine/{dataset}/partition_date=YYYY-MM-DD/
-    """
     if invalid_df.height == 0:
         logger.info(
             f"No invalid records to quarantine for dataset '{dataset}' on {partition_date}."
         )
         return None
 
-    # Append mandatory quarantine metadata columns
     quarantine_df = invalid_df.with_columns(
         [
             pl.lit("validation_failed").alias("__reason_code"),
@@ -40,20 +33,18 @@ def write_quarantine_dataset(
         ]
     )
 
-    # Construct the target S3 path ensuring the required partition structure
-    target_dir = f"{base_path.rstrip('/')}/{dataset}/partition_date={partition_date}"
+    target_dir = f"{base_path.replace('s3://', '').rstrip('/')}/{dataset}/partition_date={partition_date}"
     target_path = (
         f"{target_dir}/quarantined_{validation_name.replace(' ', '_').lower()}.parquet"
     )
 
     try:
-        # Write to S3 using Polars native write_parquet with storage_options
-        # This inherently handles overwriting the specific file, ensuring idempotency
+        fs = get_s3fs_client(s3_options)
         quarantine_df.write_parquet(
             target_path,
             compression="snappy",
             use_pyarrow=True,
-            pyarrow_options={"storage_options": s3_options},
+            pyarrow_options={"filesystem": fs},
         )
 
         logger.warning(
@@ -66,5 +57,4 @@ def write_quarantine_dataset(
     except Exception as e:
         error_msg = f"CRITICAL: Failed to write quarantine dataset to {target_path}. Error: {str(e)}"
         logger.error(error_msg)
-        # We raise the exception because silently dropping bad data is strictly forbidden
         raise RuntimeError(error_msg) from e

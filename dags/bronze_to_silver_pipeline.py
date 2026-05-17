@@ -9,7 +9,6 @@ from airflow import DAG
 from airflow.decorators import task
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.task_group import TaskGroup
-# Import pipeline components from plugins
 from bronze_to_silver.config import SCHEMA_CONTRACTS
 from bronze_to_silver.deduplicator import deduplicate_dataset
 from bronze_to_silver.enricher import enrich_reference_data
@@ -31,6 +30,8 @@ from bronze_to_silver.silver_writer import write_silver_dataset
 
 logger = logging.getLogger(__name__)
 
+METADATA_CONN_ID = "postgres_default"
+
 DEFAULT_ARGS = {
     "owner": "data-platform",
     "retries": 2,
@@ -43,7 +44,7 @@ DEFAULT_ARGS = {
 with DAG(
     dag_id="bronze_to_silver_pipeline",
     schedule="@daily",
-    start_date=datetime(2024, 1, 1),
+    start_date=datetime(2025, 10, 1),
     catchup=True,
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
@@ -56,11 +57,8 @@ with DAG(
 
     @task(multiple_outputs=False)
     def discover_partitions(dataset: str, **context) -> list[str]:
-        """
-        Discovers new partitions in the Bronze layer based on the dataset's watermark.
-        """
         storage_options = get_s3_storage_options()
-        watermark = get_last_watermark(dataset)
+        watermark = get_last_watermark(dataset, conn_id=METADATA_CONN_ID)
 
         logger.info(f"Discovering partitions for {dataset} with watermark: {watermark}")
         partitions = discover_incremental_partitions(
@@ -71,11 +69,6 @@ with DAG(
 
     @task(multiple_outputs=False)
     def process_dataset(dataset: str, partition_paths: list[str], **context) -> dict:
-        """
-        Executes the lazy transformation pipeline:
-        Load -> Validate -> Normalize -> Deduplicate -> Handle Missing -> Detect Outliers
-        -> Aggregate -> Enrich -> Write Silver & Quarantine -> Publish Metadata.
-        """
         if not partition_paths:
             logger.info(f"No new partitions to process for {dataset}.")
             return {"status": "skipped", "dataset": dataset}
@@ -84,9 +77,8 @@ with DAG(
         execution_date = context["ds"]
         storage_options = get_s3_storage_options()
         contract = SCHEMA_CONTRACTS[dataset]
-        watermark = get_last_watermark(dataset)
+        watermark = get_last_watermark(dataset, conn_id=METADATA_CONN_ID)
 
-        # 1. Lazy Load
         lf = load_bronze_dataset(
             dataset_paths=partition_paths,
             storage_options=storage_options,
@@ -94,23 +86,18 @@ with DAG(
             time_column=contract.get("time_column"),
         )
 
-        # 2. Schema Validation (Eager check on schema only, no data materialization)
         validate_dataset_schema(lf, dataset, contract["columns"])
 
-        # 3. Normalize Types & Timestamps
         lf = normalize_dataset(lf, dataset, contract)
 
-        # 4. Deduplicate
         lf = deduplicate_dataset(
             lf,
             key_columns=contract.get("dedup_key"),
             timestamp_column=contract.get("time_column"),
         )
 
-        # 5. Handle Missing Values
         lf = handle_missing_values(lf, dataset, contract.get("missing_rules", {}))
 
-        # 6. Outlier Detection (Split valid/invalid streams)
         valid_lf, invalid_lf = detect_outliers(
             lf,
             dataset,
@@ -119,7 +106,6 @@ with DAG(
             multiplier=3.0,
         )
 
-        # 7. Write Quarantine
         q_rows = 0
         if invalid_lf is not None:
             q_rows = write_quarantine_dataset(
@@ -130,13 +116,11 @@ with DAG(
                 storage_options=storage_options,
             )
 
-        # 8. Event-time Aggregation (if configured)
         if "aggregation" in contract:
             valid_lf = aggregate_event_time_metrics(
                 valid_lf, dataset, contract["aggregation"]
             )
 
-        # 9. Enrich with Reference Data (if configured)
         if "joins" in contract:
             for join_def in contract["joins"]:
                 valid_lf = enrich_reference_data(
@@ -147,7 +131,6 @@ with DAG(
                     how=join_def.get("how", "left"),
                 )
 
-        # 10. Write Silver (Atomic overwrite_or_ignore)
         output_path = write_silver_dataset(
             lf=valid_lf,
             dataset=dataset,
@@ -155,8 +138,6 @@ with DAG(
             storage_options=storage_options,
         )
 
-        # 11. Calculate Metrics (The only `.collect()` on the valid data, highly optimized)
-        # We need row count and the max event time for the new watermark
         time_col = contract.get("time_column")
 
         if time_col and "aggregation" not in contract:
@@ -167,11 +148,9 @@ with DAG(
             processed_rows = metrics_df["count"].item(0)
             new_watermark = metrics_df["max_time"].item(0)
         else:
-            # If aggregated, time_col might have changed name or semantics, just count
             processed_rows = valid_lf.select(pl.len()).collect().item()
             new_watermark = None  # Handled below
 
-        # Fallback watermark to execution date if no time column or dataframe is empty
         if not new_watermark:
             new_watermark = datetime.strptime(execution_date, "%Y-%m-%d")
 
@@ -188,9 +167,10 @@ with DAG(
             watermark=new_watermark,
         )
 
-        # 12. Update Watermark & Publish Metadata
-        update_pipeline_watermark(dataset, new_watermark, execution_date)
-        publish_pipeline_metadata(result)
+        update_pipeline_watermark(
+            dataset, new_watermark, execution_date, conn_id=METADATA_CONN_ID
+        )
+        publish_pipeline_metadata(result, conn_id=METADATA_CONN_ID)
 
         logger.info(
             f"Successfully processed {dataset}: {processed_rows} rows. Watermark advanced to {new_watermark}."

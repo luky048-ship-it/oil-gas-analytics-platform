@@ -41,3 +41,25 @@ CREATE TABLE IF NOT EXISTS etl_metadata.dq_pipeline_runs (
     updated_at TIMESTAMP WITH TIME ZONE,
     PRIMARY KEY (dataset, partition_date)
 );
+
+
+CREATE TABLE IF NOT EXISTS etl_metadata.pipeline_watermarks (
+    dataset                  VARCHAR(255) PRIMARY KEY,
+    last_processed_watermark TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at               TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+
+CREATE TABLE IF NOT EXISTS etl_metadata.pipeline_executions (
+    dataset             VARCHAR(255) NOT NULL,
+    partition_date      DATE NOT NULL,
+    processed_rows      BIGINT,
+    quarantined_rows    BIGINT,
+    execution_time_sec  DOUBLE PRECISION,
+    watermark           TIMESTAMP WITH TIME ZONE,
+    status              VARCHAR(50),
+    updated_at          TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY (dataset, partition_date)
+);
+
+

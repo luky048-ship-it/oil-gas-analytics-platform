@@ -6,9 +6,8 @@ from datetime import datetime
 from typing import Dict, List
 
 import polars as pl
-
-from dq_utils.dq_reporter import DQResult
 from dq_utils.config import TABLE_CONTRACTS
+from dq_utils.dq_reporter import DQResult
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +17,26 @@ def validate_null_thresholds(
 ) -> DQResult:
     """
     Validates the maximum allowed percentage of NULL values per column.
+    Executes in a single pass.
     """
+    if not thresholds:
+        return DQResult(
+            dataset,
+            "Null Thresholds",
+            "PASS",
+            0,
+            0,
+            "No thresholds defined",
+            datetime.utcnow(),
+        )
+
     total_rows_expr = pl.len().alias("total_rows")
     null_exprs = [
         pl.col(c).is_null().sum().alias(f"{c}_nulls") for c in thresholds.keys()
     ]
 
-    agg_lf = lf.select([total_rows_expr] + null_exprs)
-    result_df = agg_lf.collect()
+    # ONE single collect for all null checks
+    result_df = lf.select([total_rows_expr] + null_exprs).collect()
 
     total_rows = result_df["total_rows"][0]
     if total_rows == 0:
@@ -70,6 +81,12 @@ def validate_duplicate_keys(
     """
     Validates uniqueness of primary/composite keys.
     """
+    if not key_columns:
+        return DQResult(
+            dataset, "Duplicate Keys", "PASS", 0, 0, "No PK defined", datetime.utcnow()
+        )
+
+    # We do this in one query using window functions or grouped aggregations
     dup_count_df = (
         lf.group_by(key_columns)
         .len()
@@ -78,7 +95,6 @@ def validate_duplicate_keys(
         .collect()
     )
 
-    total_rows = lf.select(pl.len()).collect().item()
     duplicate_groups = (
         dup_count_df["duplicate_groups"][0] if not dup_count_df.is_empty() else 0
     )
@@ -95,7 +111,7 @@ def validate_duplicate_keys(
         validation_type="Duplicate Keys",
         status=status,
         failed_rows=duplicate_groups,
-        checked_rows=total_rows,
+        checked_rows=0,  # We don't calculate total_rows here to save an extra S3 scan
         message=message,
         created_at=datetime.utcnow(),
     )
@@ -103,64 +119,78 @@ def validate_duplicate_keys(
 
 def validate_business_rules(lf: pl.LazyFrame, dataset: str) -> List[DQResult]:
     """
-    Validates domain-specific constraints.
+    Validates domain-specific constraints in a SINGLE PASS execution.
     """
     contract = TABLE_CONTRACTS.get(dataset)
     if not contract:
         return []
 
-    results = []
-    total_rows = lf.select(pl.len()).collect().item()
+    exprs = [pl.len().alias("total_rows")]
+    check_metadata = []
 
+    # 1. Build expressions for Value Ranges
+    for col, (min_val, max_val) in contract.value_ranges.items():
+        conds = []
+        if min_val is not None:
+            conds.append(pl.col(col) < min_val)
+        if max_val is not None:
+            conds.append(pl.col(col) > max_val)
+
+        if conds:
+            col_alias = f"range_fail_{col}"
+            # sum() of booleans gives the count of True (failed) rows
+            exprs.append(
+                pl.any_horizontal(conds).fill_null(False).sum().alias(col_alias)
+            )
+            check_metadata.append(
+                {
+                    "alias": col_alias,
+                    "type": f"Range Check: {col}",
+                    "msg": f"Column {col} out of range ({min_val}, {max_val}).",
+                }
+            )
+
+    # 2. Build expressions for Enums
+    for col, allowed_values in contract.enums.items():
+        col_alias = f"enum_fail_{col}"
+        exprs.append(
+            (~pl.col(col).is_in(allowed_values)).fill_null(False).sum().alias(col_alias)
+        )
+        check_metadata.append(
+            {
+                "alias": col_alias,
+                "type": f"Enum Check: {col}",
+                "msg": f"Column {col} contains unapproved values.",
+            }
+        )
+
+    if len(exprs) == 1:
+        return []  # No rules to check
+
+    # =================================================================
+    # THE MAGIC: One single collect() for ALL rules simultaneously!
+    # =================================================================
+    res_df = lf.select(exprs).collect()
+
+    total_rows = res_df["total_rows"][0]
     if total_rows == 0:
         return []
 
-    # 1. Validate Value Ranges
-    for col, range_val in contract.value_ranges.items():
-        min_val, max_val = range_val
-        exprs = []
-        if min_val is not None:
-            exprs.append(pl.col(col) < min_val)
-        if max_val is not None:
-            exprs.append(pl.col(col) > max_val)
+    results = []
 
-        if exprs:
-            combined_expr = pl.any_horizontal(exprs)
-            failed_count = lf.filter(combined_expr).select(pl.len()).collect().item()
-
-            status = "FAIL" if failed_count > 0 else "PASS"
-            msg = f"Column {col} out of range ({min_val}, {max_val})."
-            results.append(
-                DQResult(
-                    dataset,
-                    f"Range Check: {col}",
-                    status,
-                    failed_count,
-                    total_rows,
-                    msg,
-                    datetime.utcnow(),
-                )
-            )
-
-    # 2. Validate Enums
-    for col, allowed_values in contract.enums.items():
-        failed_count = (
-            lf.filter(~pl.col(col).is_in(allowed_values))
-            .select(pl.len())
-            .collect()
-            .item()
-        )
+    # 3. Parse the single-row result DataFrame back into DQResult objects
+    for meta in check_metadata:
+        failed_count = res_df[meta["alias"]][0]
         status = "FAIL" if failed_count > 0 else "PASS"
-        msg = f"Column {col} contains unapproved values."
         results.append(
             DQResult(
-                dataset,
-                f"Enum Check: {col}",
-                status,
-                failed_count,
-                total_rows,
-                msg,
-                datetime.utcnow(),
+                dataset=dataset,
+                validation_type=meta["type"],
+                status=status,
+                failed_rows=failed_count,
+                checked_rows=total_rows,
+                message=meta["msg"] if failed_count > 0 else "Passed",
+                created_at=datetime.utcnow(),
             )
         )
 

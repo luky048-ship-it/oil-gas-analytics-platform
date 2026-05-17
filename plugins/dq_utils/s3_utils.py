@@ -14,6 +14,23 @@ from dq_utils.dq_reporter import DQResult
 logger = logging.getLogger(__name__)
 
 
+def get_s3fs_client(s3_options: dict) -> s3fs.S3FileSystem:
+    """Безопасно создает клиент s3fs, отсекая ключи Polars."""
+    s3fs_kwargs = {
+        "key": s3_options.get("key"),
+        "secret": s3_options.get("secret"),
+        "endpoint_url": s3_options.get("endpoint_url"),
+    }
+    if "endpoint_url" in s3_options:
+        s3fs_kwargs["client_kwargs"] = {"endpoint_url": s3_options["endpoint_url"]}
+
+    if "use_ssl" in s3_options:
+        s3fs_kwargs["use_ssl"] = s3_options["use_ssl"]
+
+    s3fs_kwargs = {k: v for k, v in s3fs_kwargs.items() if v is not None}
+    return s3fs.S3FileSystem(**s3fs_kwargs)
+
+
 def get_s3_storage_options(conn_id: str = "aws_default") -> dict[str, Any]:
     """
     Retrieves credentials from Airflow Connection and returns a FLAT storage_options
@@ -64,7 +81,7 @@ def discover_available_partitions(
     Returns a list of discovered partition paths.
     Raises AirflowFailException on missing partitions to enforce SLA and pipeline integrity.
     """
-    fs = s3fs.S3FileSystem(**s3_options)
+    fs = get_s3fs_client(s3_options)
     bucket_path = base_path.replace("s3://", "").rstrip("/")
     dataset_path = f"{bucket_path}/{dataset}"
 
@@ -77,7 +94,7 @@ def discover_available_partitions(
             files = fs.glob(search_pattern)
     except Exception as e:
         logger.error(f"S3 Listing failed: {str(e)}")
-        return []
+        raise AirflowFailException(f"CRITICAL: S3 Listing failed: {str(e)}")
 
     return [
         f"s3://{str(p)}" if not str(p).startswith("s3://") else str(p)
@@ -89,12 +106,7 @@ def discover_available_partitions(
 def validate_file_integrity(
     dataset: str, partition_path: str, s3_options: dict
 ) -> DQResult:
-    """
-    Validates physical file integrity without loading the dataset into memory.
-    Checks existence, readability, and ensures the parquet file is not empty.
-    Raises AirflowFailException for critical corruptions.
-    """
-    fs = s3fs.S3FileSystem(**s3_options)
+    fs = get_s3fs_client(s3_options)
 
     try:
         if not fs.exists(partition_path):
@@ -107,9 +119,6 @@ def validate_file_integrity(
             num_rows = pf.metadata.num_rows
 
             if num_rows == 0:
-                #                raise AirflowFailException(
-                #                    f"CRITICAL: Empty parquet file detected at {partition_path}"
-                #                )
                 logger.warning(
                     f"No partitions found for dataset '{dataset}' on date. Skipping."
                 )

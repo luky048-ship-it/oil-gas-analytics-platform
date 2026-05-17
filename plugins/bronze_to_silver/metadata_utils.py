@@ -1,20 +1,22 @@
 # plugins/bronze_to_silver/metadata_utils.py
+import logging
 from datetime import datetime
 from typing import Optional
 
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+from bronze_to_silver.pipeline_execution import PipelineExecutionResult
 from psycopg2.extras import execute_values
 
-from bronze_to_silver.pipeline_execution import PipelineExecutionResult
+logger = logging.getLogger(__name__)
 
 
-def get_postgres_connection(conn_id: str = "etl_metadata_db"):
+def get_postgres_connection(conn_id: str = "postgres_default"):
     hook = PostgresHook(postgres_conn_id=conn_id)
     return hook.get_conn()
 
 
 def get_last_watermark(
-    dataset: str, conn_id: str = "etl_metadata_db"
+    dataset: str, conn_id: str = "postgres_default"
 ) -> Optional[datetime]:
     """
     Retrieves the maximum processed event_time for a given dataset.
@@ -24,19 +26,20 @@ def get_last_watermark(
         FROM etl_metadata.pipeline_watermarks
         WHERE dataset = %s;
     """
-    with get_postgres_connection(conn_id) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(query, (dataset,))
-            result = cursor.fetchone()
-
-    return result[0] if result else None
+    try:
+        hook = PostgresHook(postgres_conn_id=conn_id)
+        result = hook.get_first(query, parameters=(dataset,))
+        return result[0] if result else None
+    except Exception as e:
+        logger.error(f"Failed to fetch watermark for {dataset}: {e}")
+        return None
 
 
 def update_pipeline_watermark(
     dataset: str,
     watermark: datetime,
     execution_date: str,
-    conn_id: str = "etl_metadata_db",
+    conn_id: str = "postgres_default",
 ) -> None:
     """
     Atomically UPSERTs the new watermark into the metadata database.
@@ -55,7 +58,7 @@ def update_pipeline_watermark(
 
 
 def publish_pipeline_metadata(
-    result: PipelineExecutionResult, conn_id: str = "etl_metadata_db"
+    result: PipelineExecutionResult, conn_id: str = "postgres_default"
 ) -> None:
     """
     Publishes the execution metrics of the Bronze-to-Silver pipeline step.
