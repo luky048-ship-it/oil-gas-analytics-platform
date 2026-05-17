@@ -42,120 +42,88 @@ default_args = {
 )
 def silver_gold_marts_dag():
 
+    def _check_dq_status(dataset_name: str, dates: list[str]) -> bool:
+        hook = PostgresHook(postgres_conn_id="postgres_default")
+        with hook.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                                SELECT DISTINCT status 
+                                FROM etl_metadata.dq_pipeline_runs
+                                WHERE dataset = %s AND partition_date = ANY(%s)
+                            """,
+                    (dataset_name, dates),
+                )
+                rows = cur.fetchall()
+        if not rows:
+            logging.warning(f"No DQ status for {dataset_name} on {dates}. Blocking.")
+            return False
+        return all(row[0] == "SUCCESS" for row in rows)
+
     @task
     def discover_dates():
         last_dt = get_last_watermark("mart_production")
         new_dates = discover_new_partitions(SILVER_PRODUCTION, last_dt)
         if not new_dates:
-            logging.info("No new partitions discovered in Silver.")
+            raise AirflowSkipException("No new DQ-validated partitions in Silver.")
         return new_dates
 
     @task_group(group_id="process_marts")
     def process_marts(partition_dates):
 
-        def _check_dq_status(dataset_name: str, dates: list[str]) -> bool:
-            """Проверяет статус DQ в мета-БД. Возвращает True только если SUCCESS."""
-            hook = PostgresHook(postgres_conn_id="postgres_default")
-            with hook.get_conn() as conn:
-                with conn.cursor() as cur:
-                    # Настройте таблицу и поля под вашу схему мета-данных
-                    cur.execute(
-                        """
-                        SELECT DISTINCT status FROM etl_metadata.dq_validation_results 
-                        WHERE dataset = %s AND partition_date = ANY(%s)
-                    """,
-                        (dataset_name, dates),
-                    )
-                    rows = cur.fetchall()
-                    if not rows:
-                        logging.warning(
-                            f"No DQ status found for {dataset_name} on {dates}. Treating as UNKNOWN."
-                        )
-                        return False
-                    statuses = {row[0] for row in rows}
-                    if "SUCCESS" in statuses and len(statuses) == 1:
-                        return True
-                    logging.warning(
-                        f"DQ status for {dataset_name} is {statuses}, not strictly SUCCESS."
-                    )
-                    return False
-
-        def _filter_quarantined(
-            lf: pl.LazyFrame,
-            dataset_name: str,
-            dates: list[str],
-            unique_keys: list[str],
-        ) -> pl.LazyFrame:
-            """Загружает ID из карантина и применяет anti-join, оставляя только чистые данные."""
-            # Пример загрузки карантина из БД. Если у вас карантин в S3/MinIO, замените на load_s3_quarantine(...)
-            hook = PostgresHook(postgres_conn_id="postgres_default")
-            with hook.get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT {} FROM etl_metadata.quarantine_keys
-                        WHERE dataset = %s AND partition_date = ANY(%s)
-                    """.format(", ".join(unique_keys)),
-                        (dataset_name, dates),
-                    )
-                    rows = cur.fetchall()
-
-            if not rows:
-                logging.info(
-                    f"No quarantine records for {dataset_name} on {dates}. Skipping filter."
-                )
-                return lf
-
-            quarantine_lf = pl.DataFrame(rows, schema=unique_keys).lazy()
-            logging.info(
-                f"Filtering out {quarantine_lf.collect().shape[0]} quarantined records for {dataset_name}."
-            )
-            return lf.join(quarantine_lf, on=unique_keys, how="anti")
-
         @task
         def build_production_task(dates):
-            lf_prod = load_silver_dataset(SILVER_PRODUCTION, dates)
-            lf_tele = load_silver_dataset(SILVER_TELEMETRY, dates)
-            lf_targ = load_silver_dataset(SILVER_TARGETS, dates)
+            contract = MART_CONTRACTS["mart_production"]
+            if not _check_dq_status("production", dates):
+                raise AirflowSkipException(f"DQ != SUCCESS for production on {dates}")
 
-            lf_result = build_mart_production(lf_prod, lf_tele, lf_targ)
+            sources = {
+                name: load_silver_dataset(name, dates, pk_columns=pks)
+                for name, pks in contract.source_datasets.items()
+            }
+
+            lf_result = build_mart_production(
+                sources["production"],
+                sources["well_telemetry"],
+                sources["well_targets"],
+            )
             lf_result = validate_business_readiness(lf_result, "mart_production")
 
             df = lf_result.collect()
             validate_mart_before_publish(df, "mart_production")
-
             staging_table = write_staging_mart(df, "mart_production")
 
-            actual_dates = df.select("partition_date").unique().to_series().to_list()
-            actual_dates = [str(d) for d in actual_dates]
-
+            actual_dates = [
+                str(d)
+                for d in df.select("partition_date").unique().to_series().to_list()
+            ]
             atomic_partition_overwrite("mart_production", staging_table, actual_dates)
             cleanup_staging(staging_table)
 
-            # Update watermarks for each processed date
             run_id = "{{ run_id }}"
             for dt in actual_dates:
                 update_mart_watermark("mart_production", dt, run_id)
-
-            return True  # Signal for dependent marts
+            return True
 
         @task
         def build_well_kpi_task(dates, prod_ready):
+            contract = MART_CONTRACTS["mart_well_kpi"]
+            if not _check_dq_status("production", dates):
+                raise AirflowSkipException(
+                    f"Upstream DQ != SUCCESS for well_kpi on {dates}"
+                )
 
-            lf_prod_batch = build_mart_production(
-                load_silver_dataset(SILVER_PRODUCTION, dates),
-                load_silver_dataset(SILVER_TELEMETRY, dates),
-                load_silver_dataset(SILVER_TARGETS, dates),
-            )
-
+            sources = {
+                name: load_silver_dataset(name, dates, pk_columns=pks)
+                for name, pks in contract.source_datasets.items()
+            }
             lf_history = load_gold_dataset(TABLE_MART_PRODUCTION)
 
-            lf_result = build_mart_well_kpi(lf_prod_batch, lf_history)
+            lf_result = build_mart_well_kpi(sources["production"], lf_history)
             df = lf_result.collect()
-
             validate_mart_before_publish(df, "mart_well_kpi")
-            staging_table = write_staging_mart(df, "mart_well_kpi")
 
+            staging_table = write_staging_mart(df, "mart_well_kpi")
             actual_dates = [
                 str(d)
                 for d in df.select("partition_date").unique().to_series().to_list()
@@ -169,17 +137,22 @@ def silver_gold_marts_dag():
 
         @task
         def build_failures_task(dates):
-            lf_sens = load_silver_dataset(SILVER_PUMP_SENSORS, dates)
-            lf_fail = load_silver_dataset(SILVER_PUMP_FAILURES, dates)
-            # Pumps is likely a dimension, load entirely or filter
-            lf_pumps = load_silver_dataset("pumps")
+            contract = MART_CONTRACTS["mart_failures"]
+            if not _check_dq_status("pump_sensors", dates):
+                raise AirflowSkipException(f"DQ != SUCCESS for pump_sensors on {dates}")
 
-            lf_result = build_mart_failures(lf_sens, lf_fail, lf_pumps)
+            sources = {
+                name: load_silver_dataset(name, dates, pk_columns=pks)
+                for name, pks in contract.source_datasets.items()
+            }
+
+            lf_result = build_mart_failures(
+                sources["pump_sensors"], sources["pump_failures"], sources["pumps"]
+            )
             df = lf_result.collect()
-
             validate_mart_before_publish(df, "mart_failures")
-            staging_table = write_staging_mart(df, "mart_failures")
 
+            staging_table = write_staging_mart(df, "mart_failures")
             actual_dates = [
                 str(d)
                 for d in df.select("partition_date").unique().to_series().to_list()
@@ -193,16 +166,22 @@ def silver_gold_marts_dag():
 
         @task
         def build_logistics_task(dates):
-            lf_del = load_silver_dataset(SILVER_DELIVERIES, dates)
-            lf_drv = load_silver_dataset(SILVER_DRIVERS)
-            lf_veh = load_silver_dataset(SILVER_VEHICLES)
+            contract = MART_CONTRACTS["mart_logistics"]
+            if not _check_dq_status("deliveries", dates):
+                raise AirflowSkipException(f"DQ != SUCCESS for deliveries on {dates}")
 
-            lf_result = build_mart_logistics(lf_del, lf_drv, lf_veh)
+            sources = {
+                name: load_silver_dataset(name, dates, pk_columns=pks)
+                for name, pks in contract.source_datasets.items()
+            }
+
+            lf_result = build_mart_logistics(
+                sources["deliveries"], sources["drivers"], sources["vehicles"]
+            )
             df = lf_result.collect()
-
             validate_mart_before_publish(df, "mart_logistics")
-            staging_table = write_staging_mart(df, "mart_logistics")
 
+            staging_table = write_staging_mart(df, "mart_logistics")
             actual_dates = [
                 str(d)
                 for d in df.select("partition_date").unique().to_series().to_list()
