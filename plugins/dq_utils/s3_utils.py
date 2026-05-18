@@ -1,4 +1,3 @@
-# plugins/dq_utils/s3_utils.py
 from __future__ import annotations
 
 import logging
@@ -19,26 +18,26 @@ def discover_available_partitions(
     base_path: str = "s3://datalake/raw",
 ) -> List[str]:
     """
-    Выполняет поиск партиций Parquet для заданного датасета и даты.
-    Использует централизованный объект файловой системы S3.
+    Выполняет поиск доступных разделов (partitions) Parquet для заданного набора данных и даты.
+    Автоматически переключается между Hive-структурой и плоской структурой папок.
     """
-    # Получаем авторизованный инстанс через core-модуль
+    # Инициализация клиента S3
     fs = get_s3_filesystem()
 
     bucket_path = base_path.replace("s3://", "").rstrip("/")
     dataset_path = f"{bucket_path}/{dataset}"
 
     try:
-        # Поиск файлов с учетом партиционирования по дате
+        # Попытка поиска файлов с использованием стандартного шаблона даты
         search_pattern = f"{dataset_path}/*{execution_date}*/*.parquet"
         files = fs.glob(search_pattern)
 
-        # Резервный поиск, если структура папок плоская
+        # Резервный поиск для упрощенных структур хранения
         if not files:
             search_pattern = f"{dataset_path}/*{execution_date}*.parquet"
             files = fs.glob(search_pattern)
     except Exception as e:
-        logger.error(f"Ошибка при поиске файлов в S3: {str(e)}")
+        logger.error(f"S3 listing error: {str(e)}")
         raise AirflowFailException(f"CRITICAL: S3 Listing failed: {str(e)}")
 
     return [
@@ -50,25 +49,25 @@ def discover_available_partitions(
 
 def validate_file_integrity(dataset: str, partition_path: str) -> DQResult:
     """
-    Валидация физического состояния Parquet-файла через PyArrow.
-    Не требует конфигурации, берет её напрямую из core.
+    Проверяет физическую целостность и читаемость Parquet-файла.
+    Использует метаданные PyArrow для подтверждения структуры файла без полной загрузки данных.
     """
     fs = get_s3_filesystem()
 
     try:
-        # Проверка существования файла
+        # Проверка фактического существования объекта в хранилище
         if not fs.exists(partition_path):
             raise AirflowFailException(
                 f"CRITICAL: File does not exist at {partition_path}"
             )
 
-        # Чтение метаданных для проверки целостности структуры
+        # Анализ структуры Parquet-файла
         with fs.open(partition_path, "rb") as f:
             pf = pq.ParquetFile(f)
             num_rows = pf.metadata.num_rows
 
             if num_rows == 0:
-                logger.warning(f"Файл пуст: {partition_path}")
+                logger.warning(f"File is empty: {partition_path}")
                 return DQResult(
                     dataset=dataset,
                     validation_type="File Integrity Layer 1",
@@ -98,6 +97,10 @@ def validate_file_integrity(dataset: str, partition_path: str) -> DQResult:
 
 
 def get_fs(s3_options):
+    """
+    Вспомогательная функция для получения инстанса файловой системы S3
+    из переданных опций или создания нового.
+    """
     if s3_options.get("fs"):
         return s3_options["fs"]
     return get_s3_filesystem()

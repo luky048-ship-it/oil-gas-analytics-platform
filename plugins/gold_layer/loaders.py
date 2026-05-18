@@ -15,7 +15,8 @@ def discover_new_partitions(
     table_name: str, last_watermark: Optional[date]
 ) -> List[str]:
     """
-    Определяет новые разделы (partitions) для обработки на основе DQ метаданных.
+    Определяет список новых разделов (partitions) для обработки, основываясь на данных
+    о прохождении проверок качества (DQ) в метаданных Postgres.
     """
     query = """
         SELECT partition_date 
@@ -25,6 +26,7 @@ def discover_new_partitions(
     """
     params: List[Any] = [table_name]
 
+    # Добавление фильтрации по дате, если задан watermark
     if last_watermark:
         query += " AND partition_date > %s"
         params.append(last_watermark)
@@ -55,8 +57,9 @@ def load_silver_dataset(
     pk_columns: Optional[List[str]] = None,
 ) -> pl.LazyFrame:
     """
-    Загружает данные из Silver слоя, используя раздельные конфигурации для Polars и S3FS.
-    Исключает записи, присутствующие в карантине (Anti-Join).
+    Загружает данные из Silver слоя для указанных дат.
+    Выполняет операцию anti-join с данными в карантине для исключения ошибочных записей
+    на этапе формирования витрин.
     """
     polars_opts = get_polars_storage_options()
     fs = get_s3_filesystem()
@@ -64,11 +67,13 @@ def load_silver_dataset(
     base_path = f"{SILVER_PREFIX}/{table_name}"
     quarantine_base = f"s3://{S3_BUCKET}/quarantine/{table_name}"
 
+    # Загрузка всех данных, если даты не указаны
     if not partition_dates:
         path = f"{base_path}/**/*.parquet"
         return pl.scan_parquet(path, storage_options=polars_opts)
 
     silver_paths = []
+    # Формирование путей к существующим файлам в S3
     for dt in partition_dates:
         path_mask = f"{base_path}/partition_date={dt}/*.parquet"
 
@@ -86,6 +91,7 @@ def load_silver_dataset(
     if not pk_columns:
         return lf_silver
 
+    # Исключение записей, попавших в карантин
     quarantine_paths = []
     for dt in partition_dates:
         q_path = f"{quarantine_base}/partition_date={dt}/*.parquet"
@@ -106,7 +112,8 @@ def load_silver_dataset(
 
 def load_gold_dataset(table_name: str) -> pl.LazyFrame:
     """
-    Загружает Gold-датасет из Postgres через ADBC/DBAPI и конвертирует в LazyFrame.
+    Загружает исторические данные из целевой таблицы Gold-слоя (Postgres)
+    для использования в инкрементальных расчетах или расчете KPI.
     """
     uri = get_postgres_uri()
     try:

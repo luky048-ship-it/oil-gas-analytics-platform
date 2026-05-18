@@ -1,4 +1,3 @@
-# plugins/dq_utils/business_validator.py
 from __future__ import annotations
 
 import logging
@@ -16,8 +15,8 @@ def validate_null_thresholds(
     lf: pl.LazyFrame, dataset: str, thresholds: Dict[str, float]
 ) -> DQResult:
     """
-    Validates the maximum allowed percentage of NULL values per column.
-    Executes in a single pass.
+    Проверяет максимально допустимый процент пустых (NULL) значений в столбцах.
+    Все проверки выполняются за один проход по данным.
     """
     if not thresholds:
         return DQResult(
@@ -30,12 +29,13 @@ def validate_null_thresholds(
             datetime.utcnow(),
         )
 
+    # Формирование выражений для подсчета общего количества строк и пустых значений по столбцам
     total_rows_expr = pl.len().alias("total_rows")
     null_exprs = [
         pl.col(c).is_null().sum().alias(f"{c}_nulls") for c in thresholds.keys()
     ]
 
-    # ONE single collect for all null checks
+    # Выполнение всех проверок одним запросом
     result_df = lf.select([total_rows_expr] + null_exprs).collect()
 
     total_rows = result_df["total_rows"][0]
@@ -51,6 +51,7 @@ def validate_null_thresholds(
         )
 
     failed_checks = []
+    # Анализ полученных результатов и сравнение с пороговыми значениями
     for col, max_pct in thresholds.items():
         null_count = result_df[f"{col}_nulls"][0]
         actual_pct = (null_count / total_rows) * 100.0
@@ -79,14 +80,15 @@ def validate_duplicate_keys(
     lf: pl.LazyFrame, dataset: str, key_columns: List[str]
 ) -> DQResult:
     """
-    Validates uniqueness of primary/composite keys.
+    Проверяет уникальность первичных или составных ключей.
+    Идентифицирует наличие групп дубликатов.
     """
     if not key_columns:
         return DQResult(
             dataset, "Duplicate Keys", "PASS", 0, 0, "No PK defined", datetime.utcnow()
         )
 
-    # We do this in one query using window functions or grouped aggregations
+    # Группировка по ключам и фильтрация групп, где количество записей больше одной
     dup_count_df = (
         lf.group_by(key_columns)
         .len()
@@ -111,7 +113,7 @@ def validate_duplicate_keys(
         validation_type="Duplicate Keys",
         status=status,
         failed_rows=duplicate_groups,
-        checked_rows=0,  # We don't calculate total_rows here to save an extra S3 scan
+        checked_rows=0,
         message=message,
         created_at=datetime.utcnow(),
     )
@@ -119,7 +121,8 @@ def validate_duplicate_keys(
 
 def validate_business_rules(lf: pl.LazyFrame, dataset: str) -> List[DQResult]:
     """
-    Validates domain-specific constraints in a SINGLE PASS execution.
+    Выполняет комплексную проверку доменных ограничений (диапазоны, перечисления)
+    за ОДИН проход (single pass) по данным.
     """
     contract = TABLE_CONTRACTS.get(dataset)
     if not contract:
@@ -128,7 +131,7 @@ def validate_business_rules(lf: pl.LazyFrame, dataset: str) -> List[DQResult]:
     exprs = [pl.len().alias("total_rows")]
     check_metadata = []
 
-    # 1. Build expressions for Value Ranges
+    # 1. Формирование проверок диапазонов значений (Value Ranges)
     for col, (min_val, max_val) in contract.value_ranges.items():
         conds = []
         if min_val is not None:
@@ -138,7 +141,6 @@ def validate_business_rules(lf: pl.LazyFrame, dataset: str) -> List[DQResult]:
 
         if conds:
             col_alias = f"range_fail_{col}"
-            # sum() of booleans gives the count of True (failed) rows
             exprs.append(
                 pl.any_horizontal(conds).fill_null(False).sum().alias(col_alias)
             )
@@ -150,7 +152,7 @@ def validate_business_rules(lf: pl.LazyFrame, dataset: str) -> List[DQResult]:
                 }
             )
 
-    # 2. Build expressions for Enums
+    # 2. Формирование проверок по спискам допустимых значений (Enums)
     for col, allowed_values in contract.enums.items():
         col_alias = f"enum_fail_{col}"
         exprs.append(
@@ -165,11 +167,9 @@ def validate_business_rules(lf: pl.LazyFrame, dataset: str) -> List[DQResult]:
         )
 
     if len(exprs) == 1:
-        return []  # No rules to check
+        return []
 
-    # =================================================================
-    # THE MAGIC: One single collect() for ALL rules simultaneously!
-    # =================================================================
+    # 3. Одновременное выполнение всех накопленных правил через материализацию LazyFrame
     res_df = lf.select(exprs).collect()
 
     total_rows = res_df["total_rows"][0]
@@ -178,7 +178,7 @@ def validate_business_rules(lf: pl.LazyFrame, dataset: str) -> List[DQResult]:
 
     results = []
 
-    # 3. Parse the single-row result DataFrame back into DQResult objects
+    # 4. Преобразование результатов агрегации в объекты отчетов DQResult
     for meta in check_metadata:
         failed_count = res_df[meta["alias"]][0]
         status = "FAIL" if failed_count > 0 else "PASS"

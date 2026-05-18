@@ -1,4 +1,3 @@
-# plugins/bronze_to_silver/enricher.py
 from typing import Any, Dict
 
 import polars as pl
@@ -12,17 +11,17 @@ def enrich_reference_data(
     how: str = "left",
 ) -> pl.LazyFrame:
     """
-    Lazily joins the primary dataset with a reference dataset (e.g., wells, pumps).
-    Assumes the reference dataset is stored in Silver and already deduplicated.
+    Выполняет ленивое (lazy) объединение основного набора данных со справочником (например, скважины, насосы).
+    Предполагается, что справочник хранится в Silver слое и уже прошел дедупликацию.
     """
-    # Load the reference dataset lazily
+    # Загрузка справочного набора данных в режиме LazyFrame
     ref_lf = pl.scan_parquet(
         f"{reference_dataset}/**/*.parquet",
         storage_options=storage_options,
         hive_partitioning=True,
     )
 
-    # Perform lazy join
+    # Выполнение объединения данных
     enriched_lf = lf.join(ref_lf, on=join_key, how=how)
 
     return enriched_lf

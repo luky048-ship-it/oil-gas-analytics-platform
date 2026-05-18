@@ -1,4 +1,3 @@
-# plugins/dq_utils/pipeline_status.py
 from __future__ import annotations
 
 import logging
@@ -16,11 +15,12 @@ def publish_pipeline_status(
     postgres_conn_id: str = "postgres_default",
 ) -> None:
     """
-    Publishes the final pipeline status to the etl_metadata schema.
-    Used for downstream DAG orchestration and dependency resolution.
+    Публикует итоговый статус проверки качества данных в таблицу метаданных (etl_metadata.dq_pipeline_runs).
+    Используется для координации зависимых DAG и подтверждения готовности данных.
     """
     hook = PostgresHook(postgres_conn_id=postgres_conn_id)
 
+    # Применение UPSERT для обновления статуса текущего запуска
     upsert_query = """
         INSERT INTO etl_metadata.dq_pipeline_runs (
             dataset,

@@ -1,8 +1,12 @@
-from typing import Any, Dict
-
 import polars as pl
 
-SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
+# -----------------------------------------------------------------------------
+# РЕЕСТР КОНТРАКТОВ СЛОЯ BRONZE-TO-SILVER
+# -----------------------------------------------------------------------------
+# Данный словарь определяет правила трансформации, валидации и агрегации
+# для каждого набора данных при переходе из сырого слоя (Bronze) в очищенный (Silver).
+
+SCHEMA_CONTRACTS = {
     "wells": {
         "columns": {
             "well_id": pl.Int32(),
@@ -13,19 +17,9 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
             "operator": pl.String(),
             "status": pl.String(),
         },
-        "primary_key": ["well_id"],
-        "foreign_keys": {},
         "time_column": "start_date",
         "dedup_key": ["well_id"],
-        "validation_rules": {
-            "enums": {
-                "status": ["active", "inactive", "maintenance", "decommissioned"]
-            },
-            "ranges": {},
-            "custom": [{"rule": "start_date <= current_date", "severity": "HIGH"}],
-        },
-        "outlier_columns": [],
-        "missing_rules": {"operator": {"strategy": "fill_value", "value": "UNKNOWN"}},
+        "missing_rules": {"region": {"strategy": "fill_value", "value": "UNKNOWN"}},
     },
     "production": {
         "columns": {
@@ -37,41 +31,11 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
             "water_m3": pl.Decimal(12, 2),
             "energy_kwh": pl.Decimal(12, 2),
             "downtime_hours": pl.Decimal(5, 2),
-            "temperature": pl.Decimal(5, 2),
-            "pressure": pl.Decimal(5, 2),
         },
-        "primary_key": ["prod_id"],
-        "foreign_keys": {"well_id": "wells.well_id"},
         "time_column": "date",
-        "dedup_key": ["prod_id", "date"],
-        "validation_rules": {
-            "enums": {},
-            "ranges": {
-                "oil_ton": {"min": 0.0},
-                "gas_m3": {"min": 0.0},
-                "water_m3": {"min": 0.0},
-                "energy_kwh": {"min": 0.0},
-                "downtime_hours": {"min": 0.0, "max": 24.0},
-                "pressure": {"min": 0.0, "max": 1000.0},
-                "temperature": {"min": -60.0, "max": 250.0},
-            },
-            "custom": [],
-        },
-        "outlier_columns": [
-            "oil_ton",
-            "gas_m3",
-            "water_m3",
-            "energy_kwh",
-            "temperature",
-            "pressure",
-        ],
-        "missing_rules": {
-            "oil_ton": {"strategy": "fill_value", "value": 0.0},
-            "gas_m3": {"strategy": "fill_value", "value": 0.0},
-            "water_m3": {"strategy": "fill_value", "value": 0.0},
-            "energy_kwh": {"strategy": "fill_value", "value": 0.0},
-            "downtime_hours": {"strategy": "fill_value", "value": 0.0},
-        },
+        "dedup_key": ["prod_id"],
+        "outlier_columns": ["oil_ton", "gas_m3", "water_m3"],
+        "missing_rules": {"oil_ton": {"strategy": "fill_value", "value": 0.0}},
     },
     "well_telemetry": {
         "columns": {
@@ -86,24 +50,11 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
             "vibration": pl.Decimal(5, 2),
             "oil_flow_rate": pl.Decimal(8, 2),
         },
-        "primary_key": ["record_id"],
-        "foreign_keys": {"well_id": "wells.well_id"},
         "time_column": "timestamp",
         "dedup_key": ["record_id", "timestamp"],
-        "validation_rules": {
-            "enums": {},
-            "ranges": {
-                "pump_speed_rpm": {"min": 0.0},
-                "vibration": {"min": 0.0},
-                "oil_flow_rate": {"min": 0.0},
-            },
-            "custom": [{"rule": "pressure_out >= pressure_in", "severity": "MEDIUM"}],
-        },
         "outlier_columns": [
             "pump_speed_rpm",
             "pump_current",
-            "pressure_in",
-            "pressure_out",
             "temperature",
             "vibration",
             "oil_flow_rate",

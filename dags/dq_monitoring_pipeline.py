@@ -33,16 +33,25 @@ logger = logging.getLogger(__name__)
     tags=["production", "dq"],
 )
 def dq_pipeline():
+    """
+    Пайплайн мониторинга качества данных (Data Quality).
+    Осуществляет проверку целостности файлов, актуальности (freshness),
+    соблюдения бизнес-правил и ссылочной целостности для таблиц Silver слоя.
+    """
     start = EmptyOperator(task_id="start")
     finish = EmptyOperator(task_id="finish", trigger_rule="all_done")
 
     task_groups = {}
 
+    # Динамическое создание групп задач для каждого набора данных из контракта
     for dataset_name, contract in TABLE_CONTRACTS.items():
         with TaskGroup(group_id=f"dq_{dataset_name}") as tg:
 
             @task
             def discover(ds_name, ds_date):
+                """
+                Поиск доступных разделов (partitions) в S3 для указанной даты.
+                """
                 fs = get_s3_filesystem()
                 return discover_available_partitions(
                     ds_name,
@@ -53,12 +62,17 @@ def dq_pipeline():
 
             @task
             def process_partition(ds_name, path, ds_date):
+                """
+                Выполнение комплекса проверок качества данных для конкретного раздела.
+                Включает проверку целостности файлов, свежести данных и выполнение бизнес-правил.
+                """
                 logger.info(f"Processing partition: {path}")
 
                 polars_opts = get_polars_storage_options()
                 fs = get_s3_filesystem()
                 contract_obj = TABLE_CONTRACTS[ds_name]
 
+                # Подготовка параметров для проверки ссылочной целостности
                 parent_joins = [
                     {
                         "child_key": fk.column,
@@ -68,6 +82,7 @@ def dq_pipeline():
                     for fk in contract_obj.foreign_keys
                 ]
 
+                # Базовые проверки: целостность файлов и свежесть данных
                 file_dq = validate_file_integrity(ds_name, path, s3_options={"fs": fs})
                 fresh_dq = validate_data_freshness(
                     ds_name,
@@ -79,6 +94,7 @@ def dq_pipeline():
 
                 persist_dq_results([fresh_dq.__dict__, file_dq.__dict__], ds_date)
 
+                # Запуск основного конвейера DQ (бизнес-правила, статистика, RI)
                 results, v_df, inv_df = execute_dq_pipeline(
                     dataset=ds_name,
                     partition_path=path,
@@ -99,6 +115,7 @@ def dq_pipeline():
 
                 persist_dq_results(results, ds_date)
 
+                # Запись некорректных записей в карантин
                 if inv_df.height > 0:
                     write_quarantine_dataset(
                         inv_df, ds_name, "core_dq", ds_date, s3_options={"fs": fs}
@@ -108,8 +125,10 @@ def dq_pipeline():
 
             @task
             def final_status(ds_name, ds_date):
+                """Публикация итогового статуса проверки качества данных."""
                 publish_pipeline_status(ds_name, ds_date, "SUCCESS")
 
+            # Определение зависимостей между задачами внутри группы
             paths = discover(dataset_name, "{{ ds }}")
 
             processed = process_partition.partial(
@@ -120,6 +139,7 @@ def dq_pipeline():
 
         task_groups[dataset_name] = tg
 
+    # Установка зависимостей между таблицами на основе внешних ключей (foreign keys)
     for dataset_name, contract in TABLE_CONTRACTS.items():
         start >> task_groups[dataset_name] >> finish
 

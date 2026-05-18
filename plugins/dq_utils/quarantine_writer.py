@@ -1,4 +1,3 @@
-# plugins/dq_utils/quarantine_writer.py
 from __future__ import annotations
 
 import logging
@@ -18,12 +17,17 @@ def write_quarantine_dataset(
     s3_options: dict,
     base_path: str = "s3://datalake/quarantine",
 ) -> Optional[str]:
+    """
+    Сохраняет записи, не прошедшие проверку качества, в отдельную зону карантина в S3.
+    Обогащает данные техническими столбцами с указанием причины и контекста ошибки.
+    """
     if invalid_df.height == 0:
         logger.info(
             f"No invalid records to quarantine for dataset '{dataset}' on {partition_date}."
         )
         return None
 
+    # Добавление метаданных для анализа причин попадания в карантин
     quarantine_df = invalid_df.with_columns(
         [
             pl.lit("validation_failed").alias("__reason_code"),
@@ -33,12 +37,14 @@ def write_quarantine_dataset(
         ]
     )
 
+    # Формирование целевого пути с учетом партиционирования
     target_dir = f"{base_path.replace('s3://', '').rstrip('/')}/{dataset}/partition_date={partition_date}"
     target_path = (
         f"{target_dir}/quarantined_{validation_name.replace(' ', '_').lower()}.parquet"
     )
 
     try:
+        # Прямая запись в S3 через pyarrow
         fs = get_s3fs_client(s3_options)
         quarantine_df.write_parquet(
             target_path,

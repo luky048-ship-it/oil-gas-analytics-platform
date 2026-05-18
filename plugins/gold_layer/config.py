@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 
 @dataclass
 class MartConfig:
+    """Конфигурационный класс для описания параметров витрины данных: связей с источниками и бизнес-правил."""
     table_name: str
     critical_columns: List[str]
     unique_key: List[str]
@@ -11,12 +12,14 @@ class MartConfig:
     source_datasets: Dict[str, List[str]]
 
 
+# Параметры статистического анализа
 ANALYSIS_PARAMS = {
     "z_score_threshold": 3.0,
     "risk_rolling_window": 7 * 24 * 60,
     "kpi_rolling_window": 7,
 }
 
+# Реестр конфигураций для всех витрин Gold-слоя
 MART_CONTRACTS = {
     "mart_production": MartConfig(
         table_name="gold.mart_production",

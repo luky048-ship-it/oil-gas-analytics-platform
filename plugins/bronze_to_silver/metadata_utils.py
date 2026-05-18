@@ -1,4 +1,3 @@
-# plugins/bronze_to_silver/metadata_utils.py
 import logging
 from datetime import datetime
 from typing import Optional
@@ -11,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_postgres_connection(conn_id: str = "postgres_default"):
+    """Инициализирует и возвращает соединение с базой данных Postgres через Airflow Hook."""
     hook = PostgresHook(postgres_conn_id=conn_id)
     return hook.get_conn()
 
@@ -19,7 +19,8 @@ def get_last_watermark(
     dataset: str, conn_id: str = "postgres_default"
 ) -> Optional[datetime]:
     """
-    Retrieves the maximum processed event_time for a given dataset.
+    Извлекает значение последней успешно обработанной временной отметки (watermark)
+    для указанного набора данных из таблицы метаданных.
     """
     query = """
         SELECT last_processed_watermark
@@ -42,7 +43,8 @@ def update_pipeline_watermark(
     conn_id: str = "postgres_default",
 ) -> None:
     """
-    Atomically UPSERTs the new watermark into the metadata database.
+    Выполняет атомарное обновление (UPSERT) временной отметки прогресса (watermark)
+    для набора данных. Новое значение применяется только если оно больше текущего.
     """
     query = """
         INSERT INTO etl_metadata.pipeline_watermarks (dataset, last_processed_watermark, updated_at)
@@ -61,7 +63,8 @@ def publish_pipeline_metadata(
     result: PipelineExecutionResult, conn_id: str = "postgres_default"
 ) -> None:
     """
-    Publishes the execution metrics of the Bronze-to-Silver pipeline step.
+    Публикует метрики выполнения этапа Bronze-to-Silver (количество строк, время обработки, статус)
+    в системную таблицу метаданных.
     """
     query = """
         INSERT INTO etl_metadata.pipeline_executions (

@@ -1,4 +1,3 @@
-# plugins/bronze_to_silver/silver_writer.py
 import logging
 
 import polars as pl
@@ -16,19 +15,21 @@ def write_silver_dataset(
     silver_base: str = "s3://datalake/silver",
 ) -> str:
     """
-    Записывает LazyFrame в Silver слой с Hive-партиционированием.
-    Использует централизованный s3_filesystem для авторизации.
+    Записывает обработанный LazyFrame в Silver слой с применением Hive-партиционирования.
+    Использует pyarrow для эффективной записи и перезаписи отдельных разделов.
     """
-
+    # Добавление столбца партиционирования
     lf_partitioned = lf.with_columns(pl.lit(partition_date).alias("partition_date"))
 
     try:
+        # Инициализация файловой системы S3 через fsspec/pyarrow
         s3_fs = get_s3_filesystem()
         pa_fs = PyFileSystem(FSSpecHandler(s3_fs))
     except Exception as e:
         logger.error(f"Failed to initialize S3 filesystem: {e}")
         raise
 
+    # Материализация LazyFrame в DataFrame перед записью
     df = lf_partitioned.collect()
 
     if df.height == 0:
@@ -37,8 +38,8 @@ def write_silver_dataset(
         )
         return f"{silver_base}/{dataset}/partition_date={partition_date}"
 
+    # Конвертация в Arrow Table и сохранение в S3
     arrow_table = df.to_arrow()
-
     clean_base = silver_base.replace("s3://", "")
     target_dir = f"{clean_base}/{dataset}"
 
@@ -52,7 +53,7 @@ def write_silver_dataset(
         filesystem=pa_fs,
         format="parquet",
         partitioning=ds.partitioning(field_names=["partition_date"]),
-        existing_data_behavior="overwrite_or_ignore",  # Перезаписываем только целевой раздел
+        existing_data_behavior="overwrite_or_ignore",
         max_partitions=1024,
     )
 

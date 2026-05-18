@@ -8,6 +8,7 @@ import polars as pl
 
 @dataclass
 class ForeignKeyContract:
+    """Описывает связь между дочерней и родительской таблицами для проверки ссылочной целостности."""
     column: str
     parent_table: str
     parent_column: str
@@ -15,12 +16,12 @@ class ForeignKeyContract:
 
 @dataclass
 class TableContract:
-
+    """Определяет полный контракт данных для таблицы: схему, ключи, бизнес-правила и SLA."""
     schema: Dict[str, pl.DataType]
     primary_keys: List[str]
     not_null_columns: List[str]
 
-    # Validation Rules
+    # Правила валидации
     foreign_keys: List[ForeignKeyContract] = field(default_factory=list)
     unique_columns: List[str] = field(default_factory=list)
     value_ranges: Dict[str, Tuple[Optional[float], Optional[float]]] = field(
@@ -29,14 +30,14 @@ class TableContract:
     enums: Dict[str, List[str]] = field(default_factory=dict)
     custom_rules: List[str] = field(default_factory=list)
 
-    # Observability & SLAs
+    # Параметры наблюдаемости и SLA
     freshness_sla_minutes: Optional[int] = None
     partition_column: Optional[str] = None
     statistical_monitored_columns: List[str] = field(default_factory=list)
 
 
 # -----------------------------------------------------------------------------
-# ENUMS & APPROVED VALUES
+# СПИСКИ ДОПУСТИМЫХ ЗНАЧЕНИЙ (ENUMS)
 # -----------------------------------------------------------------------------
 
 APPROVED_WELL_STATUSES = ["active", "inactive", "maintenance", "decommissioned"]
@@ -59,7 +60,7 @@ APPROVED_WEATHER_IMPACT = ["high", "medium", "low"]
 
 
 # -----------------------------------------------------------------------------
-# TABLE CONTRACTS REGISTRY
+# РЕЕСТР КОНТРАКТОВ ТАБЛИЦ
 # -----------------------------------------------------------------------------
 
 TABLE_CONTRACTS: Dict[str, TableContract] = {
@@ -85,7 +86,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "prod_id": pl.Int32(),
             "well_id": pl.Int32(),
             "date": pl.Date(),
-            "oil_ton": pl.Decimal(10, 2),  # вместо Float64
+            "oil_ton": pl.Decimal(10, 2),
             "gas_m3": pl.Decimal(12, 2),
             "water_m3": pl.Decimal(12, 2),
             "energy_kwh": pl.Decimal(12, 2),
@@ -105,7 +106,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "pressure": (0.0, 1000.0),
             "temperature": (-60.0, 250.0),
         },
-        freshness_sla_minutes=1440,  # 24 h
+        freshness_sla_minutes=1440,
         partition_column="date",
         statistical_monitored_columns=["oil_ton", "gas_m3", "water_m3"],
     ),
@@ -113,7 +114,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
         schema={
             "record_id": pl.Int32(),
             "well_id": pl.Int32(),
-            "timestamp": pl.Datetime("us"),  # унифицировать с ETL (секунды)
+            "timestamp": pl.Datetime("us"),
             "pump_speed_rpm": pl.Decimal(8, 2),
             "pump_current": pl.Decimal(8, 2),
             "pressure_in": pl.Decimal(8, 2),
@@ -123,7 +124,7 @@ TABLE_CONTRACTS: Dict[str, TableContract] = {
             "oil_flow_rate": pl.Decimal(8, 2),
         },
         primary_keys=["record_id"],
-        not_null_columns=["record_id"],  # только PK (well_id и timestamp NULL в DDL)
+        not_null_columns=["record_id"],
         foreign_keys=[ForeignKeyContract("well_id", "wells", "well_id")],
         value_ranges={
             "pump_speed_rpm": (0.0, None),

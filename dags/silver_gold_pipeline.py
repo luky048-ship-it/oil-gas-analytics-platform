@@ -35,8 +35,17 @@ default_args = {
     tags=["gold", "production", "petroleum"],
 )
 def silver_gold_marts_dag():
+    """
+    Пайплайн формирования витрин данных (Gold слой).
+    Агрегирует данные из Silver слоя, проверяет готовность бизнеса и
+    атомарно обновляет разделы в целевой базе данных (Postgres).
+    """
 
     def _check_dq_status(dataset_name: str, dates: list[str]) -> bool:
+        """
+        Проверяет статус качества данных (DQ) для указанного набора данных и дат.
+        Возвращает True только если для всех дат статус 'SUCCESS'.
+        """
         hook = PostgresHook(postgres_conn_id="postgres_default")
         with hook.get_conn() as conn:
             with conn.cursor() as cur:
@@ -56,6 +65,7 @@ def silver_gold_marts_dag():
 
     @task
     def discover_dates():
+        """Поиск новых дат разделов в Silver слое, которые еще не были обработаны в Gold."""
         last_dt = get_last_watermark("mart_production")
         new_dates = discover_new_partitions(SILVER_PRODUCTION, last_dt)
         if not new_dates:
@@ -64,18 +74,22 @@ def silver_gold_marts_dag():
 
     @task_group(group_id="process_marts")
     def process_marts(partition_dates):
+        """Группировка задач по расчету различных витрин данных."""
 
         @task
         def build_production_task(dates):
+            """Расчет витрины производственных показателей (mart_production)."""
             contract = MART_CONTRACTS["mart_production"]
             if not _check_dq_status("production", dates):
                 raise AirflowSkipException(f"DQ != SUCCESS for production on {dates}")
 
+            # Загрузка исходных данных из Silver слоя
             sources = {
                 name: load_silver_dataset(name, dates, pk_columns=pks)
                 for name, pks in contract.source_datasets.items()
             }
 
+            # Расчет витрины и валидация бизнес-логики
             lf_result = build_mart_production(
                 sources["production"],
                 sources["well_telemetry"],
@@ -85,6 +99,8 @@ def silver_gold_marts_dag():
 
             df = lf_result.collect()
             validate_mart_before_publish(df, "mart_production")
+
+            # Сохранение в staging и атомарная перезапись целевых разделов
             staging_table = write_staging_mart(df, "mart_production")
 
             actual_dates = [
@@ -94,6 +110,7 @@ def silver_gold_marts_dag():
             atomic_partition_overwrite("mart_production", staging_table, actual_dates)
             cleanup_staging(staging_table)
 
+            # Обновление watermark для отслеживания прогресса
             run_id = "{{ run_id }}"
             for dt in actual_dates:
                 update_mart_watermark("mart_production", dt, run_id)
@@ -101,6 +118,7 @@ def silver_gold_marts_dag():
 
         @task
         def build_well_kpi_task(dates, prod_ready):
+            """Расчет витрины KPI скважин (mart_well_kpi) на основе производственных данных."""
             contract = MART_CONTRACTS["mart_well_kpi"]
             if not _check_dq_status("production", dates):
                 raise AirflowSkipException(
@@ -131,6 +149,7 @@ def silver_gold_marts_dag():
 
         @task
         def build_failures_task(dates):
+            """Расчет витрины отказов оборудования (mart_failures)."""
             contract = MART_CONTRACTS["mart_failures"]
             if not _check_dq_status("pump_sensors", dates):
                 raise AirflowSkipException(f"DQ != SUCCESS for pump_sensors on {dates}")
@@ -160,6 +179,7 @@ def silver_gold_marts_dag():
 
         @task
         def build_logistics_task(dates):
+            """Расчет витрины логистических показателей (mart_logistics)."""
             contract = MART_CONTRACTS["mart_logistics"]
             if not _check_dq_status("deliveries", dates):
                 raise AirflowSkipException(f"DQ != SUCCESS for deliveries on {dates}")
@@ -187,11 +207,13 @@ def silver_gold_marts_dag():
             for dt in actual_dates:
                 update_mart_watermark("mart_logistics", dt, run_id)
 
+        # Определение последовательности выполнения задач в группе
         prod_ready = build_production_task(partition_dates)
         build_well_kpi_task(partition_dates, prod_ready)
         build_failures_task(partition_dates)
         build_logistics_task(partition_dates)
 
+    # Основной поток выполнения DAG
     dates = discover_dates()
     process_marts(dates)
 

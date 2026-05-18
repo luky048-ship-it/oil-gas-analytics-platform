@@ -1,4 +1,3 @@
-# plugins/dq_utils/statistical_validator.py
 from __future__ import annotations
 
 import logging
@@ -16,8 +15,8 @@ def validate_volume_anomaly(
     dataset: str, current_count: int, historical_avg: float, threshold_std: float = 3.0
 ) -> DQResult:
     """
-    Validates dataset row count against historical averages to detect sudden drops or spikes.
-    Non-critical validation (WARNING level).
+    Проверяет аномалии объема данных (количество строк) по сравнению с историческими средними значениями.
+    Позволяет обнаружить резкие скачки или провалы в объеме поступающих данных.
     """
     if historical_avg <= 0:
         return DQResult(
@@ -30,11 +29,11 @@ def validate_volume_anomaly(
             datetime.utcnow(),
         )
 
-    # Simplified z-score approach assuming Poisson-like variance where std ~ sqrt(mean)
-    # In a real scenario, historical standard deviation should be fetched from etl_metadata
+    # Приблизительная оценка стандартного отклонения на основе распределения Пуассона (std ~ sqrt(mean))
     estimated_std = (historical_avg**0.5) if historical_avg > 0 else 1.0
     z_score = abs(current_count - historical_avg) / estimated_std
 
+    # Статус WARNING устанавливается при превышении порога z-score
     status = "WARNING" if z_score > threshold_std else "PASS"
     msg = f"Volume z-score: {z_score:.2f}. Current: {current_count}, HistAvg: {historical_avg:.1f}."
 
@@ -59,13 +58,14 @@ def validate_distribution_drift(
     historical_stats: Dict[str, Tuple[float, float]],
 ) -> List[DQResult]:
     """
-    Calculates mean and standard deviation for monitored columns lazily.
-    Compares against historical stats to detect statistical drift (e.g., sensor calibration issues).
+    Вычисляет среднее значение и стандартное отклонение для отслеживаемых столбцов и
+    сравнивает их с историческими показателями для обнаружения концептуального дрейфа (drift).
     """
     if not monitored_columns or not historical_stats:
         return []
 
     agg_exprs = []
+    # Формирование выражений для расчета статистик
     for col in monitored_columns:
         if col in historical_stats:
             agg_exprs.extend(
@@ -78,6 +78,7 @@ def validate_distribution_drift(
     if not agg_exprs:
         return []
 
+    # Материализация статистик за один проход
     stats_df = lf.select(agg_exprs).collect()
     total_rows = lf.select(pl.len()).collect().item()
 
@@ -92,7 +93,7 @@ def validate_distribution_drift(
         if curr_mean is None or hist_std == 0:
             continue
 
-        # Calculate drift z-score
+        # Расчет z-score дрейфа среднего значения
         drift_z = abs(curr_mean - hist_mean) / hist_std
 
         status = "WARNING" if drift_z > 3.0 else "PASS"

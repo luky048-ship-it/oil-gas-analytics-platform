@@ -4,10 +4,15 @@ import polars as pl
 def build_mart_failures(
     lf_sensors: pl.LazyFrame, lf_failures: pl.LazyFrame, lf_pumps: pl.LazyFrame
 ) -> pl.LazyFrame:
-    # Соединяем датчики с информацией о насосах
+    """
+    Формирует витрину анализа отказов оборудования (mart_failures).
+    Объединяет телеметрию насосов со справочной информацией и историей отказов.
+    Рассчитывает статистические аномалии (Z-Score) для вибрации и температуры.
+    """
+    # 1. Обогащение телеметрии датчиков данными о характеристиках насосов
     df = lf_sensors.join(lf_pumps, on="pump_id", how="left")
 
-    # Расчет Z-Score для вибрации (поиск аномалий)
+    # 2. Расчет статистических показателей (Z-Score) для выявления отклонений
     df = df.with_columns(
         [
             (
@@ -21,7 +26,7 @@ def build_mart_failures(
         ]
     )
 
-    # Пометка аномалий
+    # 3. Маркировка строк как аномальных при существенном отклонении от среднего
     df = df.with_columns(
         pl.any_horizontal(
             [
@@ -31,7 +36,7 @@ def build_mart_failures(
         ).alias("is_anomaly")
     )
 
-    # Соединяем с фактами отказов
+    # 4. Сопоставление данных телеметрии с фактическими событиями отказов
     lf_fail_event = lf_failures.select(
         [
             "pump_id",
@@ -44,9 +49,9 @@ def build_mart_failures(
     df = df.join(lf_fail_event, on=["pump_id", "timestamp"], how="left")
     df = df.with_columns(
         pl.col("date").alias("partition_date")
-    )  # для партиционирования
+    )
 
-    # ФИНАЛЬНЫЙ КАСТ
+    # 5. Финальное приведение типов данных для экспорта в Gold-слой
     return df.select(
         [
             pl.col("pump_id").cast(pl.Int32),
@@ -63,7 +68,6 @@ def build_mart_failures(
             pl.col("is_anomaly").cast(pl.Boolean),
             pl.col("failure_type").cast(pl.String),
             pl.col("is_failure").fill_null(False).cast(pl.Boolean),
-            # Предиктивные метрики (заглушки для примера)
             pl.lit(0.05).alias("risk_score").cast(pl.Decimal(5, 4)),
             pl.lit(0.01).alias("failure_probability").cast(pl.Decimal(5, 4)),
         ]

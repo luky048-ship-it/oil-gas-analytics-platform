@@ -1,4 +1,3 @@
-# dags/bronze_to_silver_pipeline.py
 from __future__ import annotations
 
 import logging
@@ -32,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 METADATA_CONN_ID = "postgres_default"
 
+# Настройки по умолчанию для задач Airflow в рамках данного пайплайна
 DEFAULT_ARGS = {
     "owner": "data-platform",
     "retries": 2,
@@ -52,11 +52,16 @@ with DAG(
     doc_md=__doc__,
 ) as dag:
 
+    # Определение начальной и конечной точек выполнения DAG
     start = EmptyOperator(task_id="start")
     finish = EmptyOperator(task_id="finish", trigger_rule="all_done")
 
     @task(multiple_outputs=False)
     def discover_partitions(dataset: str, **context) -> list[str]:
+        """
+        Выполняет поиск новых разделов (partitions) данных в S3 для указанного набора данных,
+        учитывая текущую отметку watermark.
+        """
         storage_options = get_s3_storage_options()
         watermark = get_last_watermark(dataset, conn_id=METADATA_CONN_ID)
 
@@ -69,6 +74,10 @@ with DAG(
 
     @task(multiple_outputs=False)
     def process_dataset(dataset: str, partition_paths: list[str], **context) -> dict:
+        """
+        Основная функция обработки набора данных: загрузка из Bronze, валидация, очистка,
+        трансформация и сохранение в Silver слой.
+        """
         if not partition_paths:
             logger.info(f"No new partitions to process for {dataset}.")
             return {"status": "skipped", "dataset": dataset}
@@ -79,6 +88,7 @@ with DAG(
         contract = SCHEMA_CONTRACTS[dataset]
         watermark = get_last_watermark(dataset, conn_id=METADATA_CONN_ID)
 
+        # Загрузка данных из Bronze слоя
         lf = load_bronze_dataset(
             dataset_paths=partition_paths,
             storage_options=storage_options,
@@ -86,18 +96,21 @@ with DAG(
             time_column=contract.get("time_column"),
         )
 
+        # Валидация схемы и нормализация данных
         validate_dataset_schema(lf, dataset, contract["columns"])
-
         lf = normalize_dataset(lf, dataset, contract)
 
+        # Дедупликация записей по ключам
         lf = deduplicate_dataset(
             lf,
             key_columns=contract.get("dedup_key"),
             timestamp_column=contract.get("time_column"),
         )
 
+        # Обработка пропущенных значений
         lf = handle_missing_values(lf, dataset, contract.get("missing_rules", {}))
 
+        # Обнаружение аномалий (outliers) и разделение данных на валидные и подозрительные
         valid_lf, invalid_lf = detect_outliers(
             lf,
             dataset,
@@ -106,6 +119,7 @@ with DAG(
             multiplier=3.0,
         )
 
+        # Запись подозрительных записей в карантин
         q_rows = 0
         if invalid_lf is not None:
             q_rows = write_quarantine_dataset(
@@ -116,11 +130,13 @@ with DAG(
                 storage_options=storage_options,
             )
 
+        # Выполнение агрегаций, если они предусмотрены контрактом
         if "aggregation" in contract:
             valid_lf = aggregate_event_time_metrics(
                 valid_lf, dataset, contract["aggregation"]
             )
 
+        # Обогащение данных путем объединения со справочниками из Silver слоя
         if "joins" in contract:
             for join_def in contract["joins"]:
                 valid_lf = enrich_reference_data(
@@ -131,6 +147,7 @@ with DAG(
                     how=join_def.get("how", "left"),
                 )
 
+        # Сохранение обработанных данных в Silver слой
         output_path = write_silver_dataset(
             lf=valid_lf,
             dataset=dataset,
@@ -138,6 +155,7 @@ with DAG(
             storage_options=storage_options,
         )
 
+        # Расчет метрик обработки и обновление watermark
         time_col = contract.get("time_column")
 
         if time_col and "aggregation" not in contract:
@@ -149,7 +167,7 @@ with DAG(
             new_watermark = metrics_df["max_time"].item(0)
         else:
             processed_rows = valid_lf.select(pl.len()).collect().item()
-            new_watermark = None  # Handled below
+            new_watermark = None
 
         if not new_watermark:
             new_watermark = datetime.strptime(execution_date, "%Y-%m-%d")
@@ -157,6 +175,7 @@ with DAG(
         t_end = datetime.now()
         execution_time = (t_end - t_start).total_seconds()
 
+        # Формирование результата выполнения для метаданных
         result = PipelineExecutionResult(
             dataset=dataset,
             partition_date=execution_date,
@@ -167,6 +186,7 @@ with DAG(
             watermark=new_watermark,
         )
 
+        # Обновление системных метаданных и публикация отчета о выполнении
         update_pipeline_watermark(
             dataset, new_watermark, execution_date, conn_id=METADATA_CONN_ID
         )
@@ -177,7 +197,7 @@ with DAG(
         )
         return result.__dict__
 
-    # Dynamically generate tasks for all datasets defined in the contract
+    # Динамическая генерация групп задач для каждого набора данных, описанного в конфигурации
     for ds_name in SCHEMA_CONTRACTS.keys():
         with TaskGroup(group_id=f"process_group_{ds_name}") as tg:
 

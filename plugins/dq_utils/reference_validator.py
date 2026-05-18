@@ -1,4 +1,3 @@
-# plugins/dq_utils/reference_validator.py
 from __future__ import annotations
 
 import logging
@@ -20,11 +19,10 @@ def validate_reference_integrity(
     dataset: str,
 ) -> DQResult:
     """
-    Validates referential integrity using a scalable anti-join.
-    Identifies orphan records in the child dataset that lack a corresponding parent.
-    Raises AirflowFailException if orphan records are found (CRITICAL severity).
+    Проверяет ссылочную целостность данных между двумя наборами данных (родительским и дочерним).
+    Использует операцию anti-join для выявления записей-сирот (orphans), не имеющих соответствия в родителе.
     """
-    # Perform a lazy anti-join to find orphans
+    # Выполнение ленивого anti-join для поиска отсутствующих связей
     orphan_lf = lf_child.join(
         lf_parent.select([parent_key]),
         left_on=child_key,
@@ -32,6 +30,7 @@ def validate_reference_integrity(
         how="anti",
     )
 
+    # Подсчет количества нарушений целостности
     orphan_count = orphan_lf.select(pl.len()).collect().item()
     total_rows = lf_child.select(pl.len()).collect().item()
 

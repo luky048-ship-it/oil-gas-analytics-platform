@@ -4,9 +4,16 @@ import polars as pl
 def build_mart_well_kpi(
     lf_prod: pl.LazyFrame, lf_history: pl.LazyFrame
 ) -> pl.LazyFrame:
+    """
+    Рассчитывает ключевые показатели эффективности (KPI) скважин (mart_well_kpi).
+    Выполняет агрегацию добычи, расчет среднего времени простоя, ранжирование скважин
+    по суммарной добыче и классификацию их по группам производительности.
+    """
 
+    # 1. Выбор необходимых столбцов для расчета агрегатов
     combined = lf_prod.select(["well_id", "date", "oil_ton", "downtime_hours"])
 
+    # 2. Агрегация производственных показателей по каждой скважине
     kpi = combined.group_by("well_id").agg(
         [
             pl.col("oil_ton").mean().alias("avg_daily_oil"),
@@ -19,7 +26,7 @@ def build_mart_well_kpi(
         ]
     )
 
-    # Ранжирование
+    # 3. Ранжирование скважин на основе суммарной добычи
     kpi = kpi.with_columns(
         [
             pl.col("total_oil")
@@ -29,7 +36,7 @@ def build_mart_well_kpi(
         ]
     )
 
-    # Группировка по перфомансу
+    # 4. Классификация скважин по группам производительности (Performance groups)
     kpi = kpi.with_columns(
         pl.when(pl.col("production_rank") <= 3)
         .then(pl.lit("Top"))
@@ -39,11 +46,11 @@ def build_mart_well_kpi(
         .alias("performance_group")
     )
 
-    # Добавляем дату
+    # 5. Определение актуальной даты для витрины на основе входных данных
     max_date = lf_prod.select(pl.col("date").max()).collect().item()
     kpi = kpi.with_columns(pl.lit(max_date).alias("date"))
 
-    # ФИНАЛЬНЫЙ КАСТ
+    # 6. Финальное приведение типов данных для соответствия схеме Gold-слоя
     return kpi.select(
         [
             pl.col("well_id").cast(pl.Int32),

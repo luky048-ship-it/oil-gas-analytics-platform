@@ -1,4 +1,3 @@
-# plugins/bronze_to_silver/event_time_aggregator.py
 from typing import Dict, Any
 
 import polars as pl
@@ -8,8 +7,8 @@ def aggregate_event_time_metrics(
     lf: pl.LazyFrame, dataset: str, aggregation_rules: Dict[str, Any]
 ) -> pl.LazyFrame:
     """
-    Performs event-time rollups (e.g., daily aggregation for telemetry).
-    Groups by the specified entity key and truncated time column.
+    Выполняет временные агрегации (rollups), например, посуточное усреднение данных телеметрии.
+    Группирует данные по идентификатору сущности и усеченному значению времени.
     """
     if not aggregation_rules:
         return lf
@@ -19,7 +18,7 @@ def aggregate_event_time_metrics(
     granularity = aggregation_rules.get("granularity", "1d")
     metrics = aggregation_rules["metrics"]
 
-    # Define the grouping timestamp (e.g., truncating to day)
+    # Определение выражения для группировки по времени (например, приведение к дате)
     if granularity == "1d":
         group_time_expr = pl.col(time_col).dt.date().alias("event_date")
     else:
@@ -27,6 +26,7 @@ def aggregate_event_time_metrics(
             pl.col(time_col).dt.truncate(granularity).alias(f"event_{granularity}")
         )
 
+    # Формирование списка выражений для расчета метрик
     agg_exprs = []
     for col, agg_funcs in metrics.items():
         for func in agg_funcs:
@@ -39,6 +39,7 @@ def aggregate_event_time_metrics(
             elif func == "sum":
                 agg_exprs.append(pl.col(col).sum().alias(f"sum_{col}"))
 
+    # Выполнение группировки и агрегации
     lf_agg = lf.group_by([key_col, group_time_expr]).agg(agg_exprs)
 
     return lf_agg

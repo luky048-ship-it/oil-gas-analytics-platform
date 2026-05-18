@@ -7,7 +7,10 @@ from gold_layer.constants import TABLE_METADATA_WATERMARKS
 
 
 def get_last_watermark(mart_name: str) -> Optional[date]:
-    """Retrieves the latest processed partition date for a given mart."""
+    """
+    Извлекает дату самого последнего успешно обработанного раздела (partition)
+    для указанной витрины данных из таблицы метаданных.
+    """
     query = f"SELECT MAX(partition_date) FROM {TABLE_METADATA_WATERMARKS} WHERE mart_name = %s"
     with get_psycopg2_conn() as conn:
         with conn.cursor() as cur:
@@ -17,7 +20,10 @@ def get_last_watermark(mart_name: str) -> Optional[date]:
 
 
 def update_mart_watermark(mart_name: str, partition_date: str, dag_run_id: str):
-    """Updates the watermark after a successful load. Must be called within the same transaction or after commit."""
+    """
+    Обновляет отметку прогресса (watermark) после успешного завершения загрузки данных в витрину.
+    Использует UPSERT для обновления метаданных текущего раздела.
+    """
     query = f"""
         INSERT INTO {TABLE_METADATA_WATERMARKS} (mart_name, partition_date, dag_run_id, loaded_at)
         VALUES (%s, %s, %s, CURRENT_TIMESTAMP)

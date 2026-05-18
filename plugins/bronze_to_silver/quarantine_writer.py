@@ -1,4 +1,3 @@
-# plugins/bronze_to_silver/quarantine_writer.py
 import logging
 
 import polars as pl
@@ -18,14 +17,14 @@ def write_quarantine_dataset(
     base_path: str = "s3://datalake/quarantine",
 ) -> int:
     """
-    Записывает невалидные записи в карантин.
-    Использует централизованный S3-клиент и обеспечивает строгий контроль ошибок.
+    Выполняет запись невалидных записей (аномалий, нарушений схемы) в зону карантина в S3.
+    Добавляет метаданные для последующего анализа причин исключения данных из основного потока.
     """
     logger.info(
         f"Starting quarantine process for dataset: {dataset}. Reason: {reason_code}"
     )
 
-    # 1. Обогащение данными (метаданные)
+    # 1. Обогащение данных техническими столбцами для карантина
     try:
         enriched_lf = invalid_lf.with_columns(
             [
@@ -35,7 +34,7 @@ def write_quarantine_dataset(
             ]
         )
 
-        # Коллектим только после того, как все трансформации готовы
+        # Материализация ошибочных записей
         invalid_df = enriched_lf.collect()
         q_rows = invalid_df.height
     except Exception as e:
@@ -46,7 +45,7 @@ def write_quarantine_dataset(
         logger.info(f"No invalid records found for dataset {dataset}. Skipping write.")
         return 0
 
-    # 2. Подготовка файловой системы
+    # 2. Инициализация файловой системы S3
     try:
         s3_fs = get_s3_filesystem()
         pa_fs = PyFileSystem(FSSpecHandler(s3_fs))
@@ -54,7 +53,7 @@ def write_quarantine_dataset(
         logger.error(f"Failed to initialize S3 filesystem for quarantine: {e}")
         raise AirflowException("Could not connect to S3 for quarantine write.")
 
-    # 3. Запись
+    # 3. Пакетная запись данных в формате Parquet с Hive-партиционированием
     target_dir = f"{base_path.replace('s3://', '')}/{dataset}"
     logger.info(f"Writing {q_rows} records to quarantine at {target_dir}")
 

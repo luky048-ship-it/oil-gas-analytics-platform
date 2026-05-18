@@ -1,10 +1,10 @@
-# plugins/bronze_to_silver/pipeline_execution.py
 from dataclasses import dataclass
 from datetime import datetime
 
 
 @dataclass
 class PipelineExecutionResult:
+    """Структура данных для хранения метрик и результатов выполнения пайплайна обработки датасета."""
     dataset: str
     partition_date: str
     processed_rows: int

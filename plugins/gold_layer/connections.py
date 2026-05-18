@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 
 def get_s3_fs() -> s3fs.S3FileSystem:
     """
-    Возвращает готовый объект S3FileSystem с логированием процесса инициализации.
+    Инициализирует и возвращает объект файловой системы S3 (fsspec).
+    Централизованная точка доступа к хранилищу для Gold слоя.
     """
     try:
         logger.info("Attempting to initialize S3FileSystem...")
@@ -26,12 +27,12 @@ def get_s3_fs() -> s3fs.S3FileSystem:
 
 def get_s3_polars_opts() -> Dict[str, Any]:
     """
-    Возвращает настройки Polars с проверкой на наличие ключей.
+    Возвращает настройки конфигурации хранилища, оптимизированные для использования в Polars.
+    Включает проверку корректности полученных параметров.
     """
     try:
         logger.debug("Retrieving Polars storage options...")
         opts = get_polars_storage_options()
-        # Проверяем, что словарь не пустой (защита от кривой конфигурации)
         if not opts:
             raise ValueError("Polars storage options returned empty dictionary.")
         return opts
@@ -43,7 +44,10 @@ def get_s3_polars_opts() -> Dict[str, Any]:
 
 
 def get_postgres_uri() -> str:
-    """Возвращает Postgres URI для ADBC driver с логированием подключения."""
+    """
+    Формирует и возвращает строку подключения (URI) к Postgres для драйверов ADBC/SQLAlchemy.
+    Извлекает параметры авторизации из Airflow Connections.
+    """
     try:
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
         conn = hook.get_connection(POSTGRES_CONN_ID)
@@ -58,7 +62,10 @@ def get_postgres_uri() -> str:
 
 
 def get_psycopg2_conn():
-    """Возвращает стандартное соединение psycopg2."""
+    """
+    Инициализирует стандартное соединение с Postgres через библиотеку psycopg2.
+    Используется для выполнения транзакционных SQL-запросов и DDL операций.
+    """
     try:
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
         return hook.get_conn()

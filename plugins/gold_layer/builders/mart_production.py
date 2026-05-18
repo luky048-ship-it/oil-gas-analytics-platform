@@ -6,15 +6,19 @@ import polars as pl
 def build_mart_production(
     lf_production: pl.LazyFrame, lf_telemetry: pl.LazyFrame, lf_targets: pl.LazyFrame
 ) -> pl.LazyFrame:
+    """
+    Формирует витрину производственных показателей (mart_production).
+    Объединяет данные о фактической добыче, показания телеметрии и плановые показатели.
+    Рассчитывает эффективность добычи и процент простоев.
+    """
 
-    # 1. Агрегация телеметрии
+    # 1. Агрегация данных телеметрии до посуточного уровня
     telemetry_daily = (
         lf_telemetry.with_columns(pl.col("timestamp").dt.date().alias("date"))
         .group_by(["well_id", "date"])
         .agg(
             [
                 pl.col("temperature").mean().alias("avg_temperature"),
-                # В витрине avg_pressure, берем давление на выходе (out)
                 pl.col("pressure_out").mean().alias("avg_pressure"),
                 pl.col("pump_speed_rpm").mean().alias("avg_pump_speed_rpm"),
                 pl.col("oil_flow_rate").mean().alias("avg_oil_flow_rate"),
@@ -23,16 +27,15 @@ def build_mart_production(
         )
     )
 
-    # 2. Сборка витрины
+    # 2. Сборка витрины путем объединения источников и переименования целевых столбцов
     mart_lf = (
         lf_production.join(telemetry_daily, on=["well_id", "date"], how="left").join(
             lf_targets, on=["well_id", "date"], how="left"
         )
-        # Исправляем имя: в источнике daily_oil_ton -> в таргете daily_target_ton
         .rename({"daily_oil_ton": "daily_target_ton"})
     )
 
-    # 3. Расчет KPI и добавление технических колонок
+    # 3. Расчет производственных KPI и добавление технических меток времени
     mart_lf = mart_lf.with_columns(
         [
             (pl.col("oil_ton") / pl.col("daily_target_ton")).alias(
@@ -44,7 +47,7 @@ def build_mart_production(
         ]
     )
 
-    # 4. ФИНАЛЬНЫЙ КАСТИНГ
+    # 4. Финальное приведение типов данных в соответствии с DDL целевой таблицы в Postgres
     return mart_lf.select(
         [
             pl.col("well_id").cast(pl.Int32),

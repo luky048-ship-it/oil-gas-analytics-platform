@@ -1,4 +1,3 @@
-# gold_layer/publishers.py
 import logging
 
 import polars as pl
@@ -15,8 +14,8 @@ logger = logging.getLogger(__name__)
 
 def _get_target_table_metadata(mart_name: str):
     """
-    Получает метаданные колонок из Postgres для выравнивания типов и порядка.
-    Исключает генерируемые колонки и автоинкременты, которые нельзя вставлять вручную.
+    Получает метаданные колонок из системных таблиц Postgres для выравнивания типов и порядка данных.
+    Исключает генерируемые колонки и автоинкременты для предотвращения ошибок при вставке.
     """
     query = """
         SELECT 
@@ -39,19 +38,21 @@ def _get_target_table_metadata(mart_name: str):
 
 def write_staging_mart(df: pl.DataFrame, mart_name: str) -> str:
     """
-    Записывает DataFrame в staging-таблицу.
-    Выполняет Precision/Scale alignment и гарантирует позиционный порядок колонок для ADBC.
+    Записывает рассчитанную витрину (DataFrame) во временную staging-таблицу в базе данных.
+    Выполняет приведение типов (precision/scale alignment) и гарантирует порядок столбцов,
+    необходимый для корректной работы драйвера ADBC.
     """
     staging_table = f"{STAGING_SCHEMA}.stg_{mart_name}"
     target_table = f"{GOLD_SCHEMA}.{mart_name}"
     uri = get_postgres_uri()
 
-    # 1. Получаем метаданные целевой таблицы для синхронизации
+    # 1. Получение метаданных целевой таблицы для синхронизации структуры
     db_columns = _get_target_table_metadata(mart_name)
 
     cast_exprs = []
     final_column_order = []
 
+    # Подготовка выражений для приведения типов данных Polars к типам Postgres
     for col_name, dtype, precision, scale in db_columns:
         if col_name in df.columns:
             final_column_order.append(col_name)
@@ -67,9 +68,10 @@ def write_staging_mart(df: pl.DataFrame, mart_name: str) -> str:
             elif dtype in ("double precision", "real"):
                 cast_exprs.append(pl.col(col_name).cast(pl.Float64))
 
+    # Применение трансформаций и упорядочивание столбцов
     df_aligned = df.with_columns(cast_exprs).select(final_column_order)
 
-    # 2. Подготовка Staging таблицы
+    # 2. Создание staging таблицы на основе структуры целевой витрины
     with get_psycopg2_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -79,7 +81,7 @@ def write_staging_mart(df: pl.DataFrame, mart_name: str) -> str:
             )
         conn.commit()
 
-    # 3. Загрузка через ADBC
+    # 3. Высокопроизводительная вставка данных через ADBC
     arrow_table = df_aligned.to_arrow()
     with adbc_dbapi.connect(uri) as conn:
         with conn.cursor() as cur:
@@ -93,8 +95,8 @@ def atomic_partition_overwrite(
     mart_name: str, staging_table: str, partition_dates: list
 ):
     """
-    Атомарная перезапись данных в Gold-слое.
-    Использует явный список колонок для безопасности при наличии GENERATED столбцов в таблице.
+    Выполняет атомарную перезапись разделов (partitions) в целевой таблице Gold-слоя.
+    Сначала удаляет старые данные за указанные даты, затем вставляет новые из staging-таблицы.
     """
     target_table = f"{GOLD_SCHEMA}.{mart_name}"
 
@@ -107,10 +109,12 @@ def atomic_partition_overwrite(
             for dt in partition_dates:
                 logger.info(f"Atomic update for {mart_name} partition: {dt}")
 
+                # Удаление существующих данных за дату раздела
                 cur.execute(
                     DELETE_PARTITION_FROM_GOLD.format(target_table=target_table), (dt,)
                 )
 
+                # Вставка новых данных с явным перечислением столбцов
                 insert_sql = f"""
                     INSERT INTO {target_table} ({col_list_str})
                     SELECT {col_list_str} FROM {staging_table}
@@ -122,7 +126,7 @@ def atomic_partition_overwrite(
 
 
 def cleanup_staging(staging_table: str):
-    """Удаляет временную таблицу после завершения транзакции."""
+    """Удаляет временную staging-таблицу после успешного переноса данных в витрину."""
     with get_psycopg2_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(DROP_STAGING_TABLE.format(staging_table=staging_table))

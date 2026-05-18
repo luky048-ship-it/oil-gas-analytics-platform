@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class DQResult:
+    """Структура данных для хранения результатов проверки качества (Data Quality)."""
     dataset: str
     validation_type: str
     status: str
@@ -27,6 +28,10 @@ def persist_dq_results(
     execution_date: str,
     postgres_conn_id: str = "postgres_default",
 ) -> None:
+    """
+    Сохраняет результаты валидации DQ в базу данных метаданных (Postgres).
+    Применяет логику UPSERT для обновления данных при повторных запусках за тот же раздел.
+    """
     if not results:
         return
 
@@ -46,6 +51,7 @@ def persist_dq_results(
     """
     now = datetime.now(timezone.utc).isoformat()
 
+    # Подготовка записей для пакетной вставки
     records = [
         (
             r["dataset"],

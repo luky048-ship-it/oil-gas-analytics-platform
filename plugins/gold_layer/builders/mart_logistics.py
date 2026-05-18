@@ -4,12 +4,17 @@ import polars as pl
 def build_mart_logistics(
     lf_deliv: pl.LazyFrame, lf_drivers: pl.LazyFrame, lf_vehicles: pl.LazyFrame
 ) -> pl.LazyFrame:
-    # Обогащение справочниками
+    """
+    Формирует витрину логистических показателей (mart_logistics).
+    Обогащает данные о поставках информацией о водителях и транспортных средствах.
+    Рассчитывает удельные затраты на километр и на тонну груза.
+    """
+    # 1. Обогащение данных о доставках справочной информацией
     df = lf_deliv.join(lf_drivers, on="driver_id", how="left").join(
         lf_vehicles, on="vehicle_id", how="left"
     )
 
-    # Расчетные показатели
+    # 2. Расчет производных логистических метрик
     df = df.with_columns(
         [
             (pl.col("cost_usd") / pl.col("distance_km")).alias("cost_per_km"),
@@ -18,7 +23,7 @@ def build_mart_logistics(
         ]
     )
 
-    # ФИНАЛЬНЫЙ КАСТ
+    # 3. Приведение типов данных к целевой схеме Postgres
     return df.select(
         [
             pl.col("delivery_id").cast(pl.Int64),
@@ -26,7 +31,7 @@ def build_mart_logistics(
             pl.col("source").cast(pl.String),
             pl.col("destination").cast(pl.String),
             pl.col("product_type").cast(pl.String),
-            pl.col("volume_ton").cast(pl.Decimal(12, 3)),  # Upgrade 10,2 -> 12,3
+            pl.col("volume_ton").cast(pl.Decimal(12, 3)),
             pl.col("cost_usd").cast(pl.Decimal(14, 2)),
             pl.col("delay_hours").cast(pl.Decimal(8, 2)),
             pl.col("distance_km").cast(pl.Decimal(10, 2)),

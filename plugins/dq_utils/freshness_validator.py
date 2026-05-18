@@ -1,4 +1,3 @@
-# plugins/dq_utils/freshness_validator.py
 from __future__ import annotations
 
 import logging
@@ -19,13 +18,14 @@ def validate_data_freshness(
     base_path: str = "s3://datalake/raw",
 ) -> DQResult:
     """
-    Validates data freshness by checking the S3 object's LastModified timestamp
-    against the expected SLA. Does not require loading the dataset.
-    Raises AirflowFailException if SLA is breached.
+    Проверяет актуальность (freshness) данных, сопоставляя время последнего изменения файлов в S3
+    с установленным SLA (максимально допустимой задержкой).
+    Не требует загрузки содержимого файлов, работает на уровне метаданных S3.
     """
     fs = get_s3fs_client(s3_options)
     dataset_path = f"{base_path.rstrip('/')}/{dataset}"
 
+    # Поиск файлов в разделе по шаблону даты
     search_pattern = f"{dataset_path}/*{partition_date}*/*.parquet"
     files = fs.glob(search_pattern)
 
@@ -38,13 +38,13 @@ def validate_data_freshness(
             f"CRITICAL: No files found for freshness validation: {dataset} @ {partition_date}"
         )
 
-    # Get the latest modified file in the partition
+    # Определение времени последнего изменения среди всех файлов раздела
     latest_modified = None
     for f in files:
         info = fs.info(f)
         last_modified = info.get("LastModified")
         if last_modified:
-            # Ensure naive UTC datetime for comparison
+            # Приведение к наивному формату UTC для сравнения
             if last_modified.tzinfo:
                 last_modified = last_modified.replace(tzinfo=None)
             if not latest_modified or last_modified > latest_modified:
@@ -58,6 +58,7 @@ def validate_data_freshness(
             dataset, "Freshness SLA", "WARNING", 0, 0, "No metadata", datetime.utcnow()
         )
 
+    # Расчет задержки в минутах и проверка на соответствие SLA
     now = datetime.utcnow()
     delay_minutes = (now - latest_modified).total_seconds() / 60.0
 
