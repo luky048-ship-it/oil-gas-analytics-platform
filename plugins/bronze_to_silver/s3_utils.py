@@ -30,6 +30,13 @@ def load_bronze_dataset(
         logger.warning("load_bronze_dataset called with empty dataset_paths list.")
         return pl.LazyFrame()
 
+    final_paths = []
+    for p in dataset_paths:
+        if p.endswith(".parquet") or "*" in p:
+            final_paths.append(p)
+        else:
+            final_paths.append(f"{p.rstrip('/')}/*.parquet")
+
     logger.info(
         f"Attempting to scan {len(dataset_paths)} path(s). "
         f"Watermark: {watermark}, Time Column: {time_column}"

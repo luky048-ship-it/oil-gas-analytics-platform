@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Tuple
 
 import polars as pl
 from airflow.exceptions import AirflowFailException
-
 from core.s3_connection import get_polars_storage_options, get_s3_filesystem
 from dq_utils.business_validator import (validate_business_rules,
                                          validate_duplicate_keys,
@@ -31,6 +30,9 @@ def execute_dq_pipeline(
 
     logger.info(f"Starting DQ pipeline for {dataset} (date: {execution_date})")
 
+    if not partition_path:
+        raise AirflowFailException(f"Partition path is empty for dataset {dataset}")
+
     try:
         polars_opts = get_polars_storage_options()
         fs = get_s3_filesystem()
@@ -38,23 +40,45 @@ def execute_dq_pipeline(
         logger.error(f"S3 Connection failed: {str(e)}")
         raise AirflowFailException(f"S3 Connection Error: {str(e)}")
 
-    lf = pl.scan_parquet(partition_path, storage_options=polars_opts).cast(
-        typing.cast(Any, expected_schema)
-    )
+    scan_path = partition_path
+    if not partition_path.endswith(".parquet") and "*" not in partition_path:
+        scan_path = f"{partition_path.rstrip('/')}/**/*.parquet"
+
+    logger.info(f"Scanning path for DQ: {scan_path}")
+
+    try:
+        lf = pl.scan_parquet(
+            scan_path, storage_options=polars_opts, hive_partitioning=True
+        )
+
+        available_cols = lf.collect_schema().names()
+        target_cols = [col for col in expected_schema.keys() if col in available_cols]
+
+        lf = lf.select(target_cols).cast(
+            {col: expected_schema[col] for col in target_cols}
+        )
+    except Exception as e:
+        raise AirflowFailException(
+            f"Failed to scan or cast parquet at {scan_path}: {e}"
+        )
 
     lf = _sanitize_datetime_columns(lf, expected_schema)
 
     results = _run_pre_materialization_checks(
         lf, dataset, key_columns, business_rules_config, historical_stats
     )
+
     lf, rule_exprs = _apply_row_level_and_fk_rules(
         lf, dataset, parent_joins, business_rules_config, fs, polars_opts
     )
 
     try:
-        df = lf.collect(engine="streaming")
+        df = lf.collect(streaming=True)
     except Exception as e:
-        raise RuntimeError(f"Pipeline failed at collect() for {dataset}: {str(e)}")
+        logger.warning(
+            f"Streaming engine failed, falling back to standard collect: {e}"
+        )
+        df = lf.collect()  # Fallback если Join не поддержал стриминг
 
     return _finalize_results(df, dataset, results, rule_exprs)
 

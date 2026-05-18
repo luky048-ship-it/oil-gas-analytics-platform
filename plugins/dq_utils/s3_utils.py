@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
-import pyarrow.parquet as pq
+import pyarrow.dataset as ds
 from airflow.exceptions import AirflowFailException
 from core.s3_connection import get_s3_filesystem
 from dq_utils.dq_reporter import DQResult
@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 def discover_available_partitions(
     dataset: str,
     execution_date: str,
-    base_path: str = "s3://datalake/raw",
+    base_path: str = "s3://datalake/silver",
+    s3_options: Optional[dict] = None,
 ) -> List[str]:
     """
     Выполняет поиск партиций Parquet для заданного датасета и даты.
@@ -24,19 +25,14 @@ def discover_available_partitions(
     """
     # Получаем авторизованный инстанс через core-модуль
     fs = get_s3_filesystem()
-
     bucket_path = base_path.replace("s3://", "").rstrip("/")
     dataset_path = f"{bucket_path}/{dataset}"
 
     try:
         # Поиск файлов с учетом партиционирования по дате
-        search_pattern = f"{dataset_path}/*{execution_date}*/*.parquet"
+        search_pattern = f"{dataset_path}/*{execution_date}*/"
         files = fs.glob(search_pattern)
 
-        # Резервный поиск, если структура папок плоская
-        if not files:
-            search_pattern = f"{dataset_path}/*{execution_date}*.parquet"
-            files = fs.glob(search_pattern)
     except Exception as e:
         logger.error(f"Ошибка при поиске файлов в S3: {str(e)}")
         raise AirflowFailException(f"CRITICAL: S3 Listing failed: {str(e)}")
@@ -48,53 +44,57 @@ def discover_available_partitions(
     ]
 
 
-def validate_file_integrity(dataset: str, partition_path: str) -> DQResult:
+def validate_file_integrity(
+    dataset: str,
+    partition_path: str,
+    s3_options: Optional[dict] = None,
+) -> DQResult:
     """
     Валидация физического состояния Parquet-файла через PyArrow.
     Не требует конфигурации, берет её напрямую из core.
     """
     fs = get_s3_filesystem()
+    path_without_s3 = partition_path.replace("s3://", "").rstrip("/")
 
     try:
-        # Проверка существования файла
-        if not fs.exists(partition_path):
-            raise AirflowFailException(
-                f"CRITICAL: File does not exist at {partition_path}"
+        parquet_ds = ds.dataset(path_without_s3, filesystem=fs, format="parquet")
+
+        files = parquet_ds.files
+        if not files:
+            return DQResult(
+                dataset=dataset,
+                validation_type="Physical Integrity",
+                status="FAIL",
+                failed_rows=0,
+                checked_rows=0,
+                message=f"Partition folder is empty: {partition_path}",
+                created_at=datetime.utcnow(),
             )
 
-        # Чтение метаданных для проверки целостности структуры
-        with fs.open(partition_path, "rb") as f:
-            pf = pq.ParquetFile(f)
-            num_rows = pf.metadata.num_rows
+        try:
+            scan_check = parquet_ds.to_batches(batch_size=1)
+            next(scan_check)
+        except StopIteration:
+            pass
 
-            if num_rows == 0:
-                logger.warning(f"Файл пуст: {partition_path}")
-                return DQResult(
-                    dataset=dataset,
-                    validation_type="File Integrity Layer 1",
-                    status="FAIL",
-                    failed_rows=0,
-                    checked_rows=0,
-                    message=f"File is empty: {partition_path}",
-                    created_at=datetime.utcnow(),
-                )
+        num_rows = parquet_ds.count_rows()
 
         return DQResult(
             dataset=dataset,
-            validation_type="File Integrity Layer 1",
+            validation_type="Physical Integrity",
             status="PASS",
             failed_rows=0,
             checked_rows=num_rows,
-            message="File is physically valid and readable",
+            message=f"Validated {len(files)} files. Total rows: {num_rows}",
             created_at=datetime.utcnow(),
         )
 
-    except AirflowFailException:
-        raise
     except Exception as e:
-        raise AirflowFailException(
-            f"CRITICAL: Corrupted parquet file at {partition_path}. Error: {str(e)}"
+        error_msg = (
+            f"CRITICAL: Integrity check failed for {partition_path}. Error: {str(e)}"
         )
+        logger.error(error_msg)
+        raise AirflowFailException(error_msg)
 
 
 def get_fs(s3_options):

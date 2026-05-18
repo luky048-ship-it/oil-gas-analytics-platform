@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from airflow.decorators import dag, task
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.task_group import TaskGroup
-from core.s3_connection import get_polars_storage_options, get_s3_filesystem
+from core.s3_connection import get_s3_filesystem
 from dq_utils.config import TABLE_CONTRACTS
 from dq_utils.core import execute_dq_pipeline
 from dq_utils.dq_reporter import persist_dq_results
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 @dag(
-    dag_id="dq_monitoring_pipeline_5",
+    dag_id="dq_monitoring_pipeline",
     start_date=datetime(2025, 10, 1),
     schedule="@daily",
     max_active_runs=1,
@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 def dq_pipeline():
     start = EmptyOperator(task_id="start")
     finish = EmptyOperator(task_id="finish", trigger_rule="all_done")
-
     task_groups = {}
 
     for dataset_name, contract in TABLE_CONTRACTS.items():
@@ -43,22 +42,29 @@ def dq_pipeline():
 
             @task
             def discover(ds_name, ds_date):
-                fs = get_s3_filesystem()
-                return discover_available_partitions(
-                    ds_name,
-                    ds_date,
-                    s3_options={"fs": fs},
-                    base_path="s3://datalake/silver",
-                )
+                hook = PostgresHook(postgres_conn_id="postgres_default")
+                sql = """
+                    SELECT status 
+                    FROM etl_metadata.pipeline_executions 
+                    WHERE dataset = %s AND partition_date = %s AND status = 'SUCCESS'
+                """
+                result = hook.get_first(sql, (ds_name, ds_date))
+
+                if result:
+                    return [f"s3://datalake/silver/{ds_name}/partition_date={ds_date}"]
+
+                return []
 
             @task
             def process_partition(ds_name, path, ds_date):
                 logger.info(f"Processing partition: {path}")
 
-                polars_opts = get_polars_storage_options()
-                fs = get_s3_filesystem()
-                contract_obj = TABLE_CONTRACTS[ds_name]
+                if not path.endswith(".parquet") and "*" not in path:
+                    path_with_mask = f"{path.rstrip('/')}/*.parquet"
+                else:
+                    path_with_mask = path
 
+                contract_obj = TABLE_CONTRACTS[ds_name]
                 parent_joins = [
                     {
                         "child_key": fk.column,
@@ -68,7 +74,10 @@ def dq_pipeline():
                     for fk in contract_obj.foreign_keys
                 ]
 
-                file_dq = validate_file_integrity(ds_name, path, s3_options={"fs": fs})
+                fs = get_s3_filesystem()
+                file_dq = validate_file_integrity(
+                    ds_name, path_with_mask, s3_options={"fs": fs}
+                )
                 fresh_dq = validate_data_freshness(
                     ds_name,
                     ds_date,
@@ -76,12 +85,11 @@ def dq_pipeline():
                     s3_options={"fs": fs},
                     base_path="s3://datalake/silver",
                 )
-
                 persist_dq_results([fresh_dq.__dict__, file_dq.__dict__], ds_date)
 
                 results, v_df, inv_df = execute_dq_pipeline(
                     dataset=ds_name,
-                    partition_path=path,
+                    partition_path=path_with_mask,
                     expected_schema=contract_obj.schema,
                     key_columns=contract_obj.primary_keys,
                     parent_joins=parent_joins,
@@ -94,7 +102,6 @@ def dq_pipeline():
                     },
                     historical_stats={},
                     execution_date=ds_date,
-                    s3_options={"polars": polars_opts, "fs": fs},
                 )
 
                 persist_dq_results(results, ds_date)

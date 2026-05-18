@@ -5,8 +5,8 @@ import logging
 from datetime import datetime
 
 from airflow.exceptions import AirflowFailException
+from core.s3_connection import get_s3_filesystem
 from dq_utils.dq_reporter import DQResult
-from dq_utils.s3_utils import get_s3fs_client
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ def validate_data_freshness(
     against the expected SLA. Does not require loading the dataset.
     Raises AirflowFailException if SLA is breached.
     """
-    fs = get_s3fs_client(s3_options)
+    fs = get_s3_filesystem()
     dataset_path = f"{base_path.rstrip('/')}/{dataset}"
 
     search_pattern = f"{dataset_path}/*{partition_date}*/*.parquet"

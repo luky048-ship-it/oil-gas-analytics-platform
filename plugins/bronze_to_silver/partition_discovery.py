@@ -66,7 +66,7 @@ def discover_incremental_partitions(
 
         # Если нет партиций (файл лежит сразу в dataset_path), считаем его валидным
         if "partition_date=" not in dir_path:
-            valid_partition_paths.add(f"s3://{dataset_path}")
+            valid_partition_paths.add(f"s3://{dataset_path}/*.parquet")
             continue
 
         # Безопасный парсинг даты

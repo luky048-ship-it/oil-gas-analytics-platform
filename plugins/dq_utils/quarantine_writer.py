@@ -5,7 +5,7 @@ import logging
 from typing import Optional
 
 import polars as pl
-from dq_utils.s3_utils import get_s3fs_client
+from core.s3_connection import get_s3_filesystem
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ def write_quarantine_dataset(
     )
 
     try:
-        fs = get_s3fs_client(s3_options)
+        fs = get_s3_filesystem()
         quarantine_df.write_parquet(
             target_path,
             compression="snappy",
