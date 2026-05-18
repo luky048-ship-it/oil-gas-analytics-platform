@@ -1,6 +1,6 @@
 # plugins/bronze_to_silver/schema_validator.py
 import logging
-from typing import Any, Dict
+from typing import Dict
 
 import polars as pl
 from airflow.exceptions import AirflowFailException

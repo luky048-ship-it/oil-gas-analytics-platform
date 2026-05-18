@@ -1,22 +1,29 @@
 import logging
-from datetime import date, datetime
-from typing import List, Optional
+from datetime import date
+from typing import Any, List, Optional
 
 import polars as pl
-from gold_layer.connections import get_psycopg2_conn, get_s3_fs
+from core.s3_connection import get_polars_storage_options, get_s3_filesystem
+
+from gold_layer.connections import get_postgres_uri, get_psycopg2_conn
 from gold_layer.constants import S3_BUCKET, SILVER_PREFIX
+
+logger = logging.getLogger(__name__)
 
 
 def discover_new_partitions(
     table_name: str, last_watermark: Optional[date]
 ) -> List[str]:
+    """
+    Определяет новые разделы (partitions) для обработки на основе DQ метаданных.
+    """
     query = """
         SELECT partition_date 
         FROM etl_metadata.dq_pipeline_runs 
         WHERE dataset = %s 
           AND status = 'SUCCESS'
     """
-    params = [table_name]
+    params: List[Any] = [table_name]
 
     if last_watermark:
         query += " AND partition_date > %s"
@@ -30,15 +37,14 @@ def discover_new_partitions(
             cur.execute(query, tuple(params))
             results = cur.fetchall()
             for row in results:
-                # row[0] is a datetime.date object
                 new_dates.append(row[0].strftime("%Y-%m-%d"))
 
     if new_dates:
-        logging.info(
-            f"[{table_name}] Discovered {len(new_dates)} DQ-validated partitions: {new_dates}"
+        logger.info(
+            f"[{table_name}] Discovered {len(new_dates)} new partitions: {new_dates}"
         )
     else:
-        logging.info(f"[{table_name}] No new DQ-validated partitions found.")
+        logger.info(f"[{table_name}] No new DQ-validated partitions found.")
 
     return new_dates
 
@@ -48,51 +54,51 @@ def load_silver_dataset(
     partition_dates: Optional[List[str]] = None,
     pk_columns: Optional[List[str]] = None,
 ) -> pl.LazyFrame:
-    fs = get_s3_fs()
+    """
+    Загружает данные из Silver слоя, используя раздельные конфигурации для Polars и S3FS.
+    Исключает записи, присутствующие в карантине (Anti-Join).
+    """
+    polars_opts = get_polars_storage_options()
+    fs = get_s3_filesystem()
+
     base_path = f"{SILVER_PREFIX}/{table_name}"
     quarantine_base = f"s3://{S3_BUCKET}/quarantine/{table_name}"
 
     if not partition_dates:
         path = f"{base_path}/**/*.parquet"
-        return pl.scan_parquet(path, storage_options=fs.storage_options)
+        return pl.scan_parquet(path, storage_options=polars_opts)
 
-    # 1. Формируем пути для Silver
     silver_paths = []
     for dt in partition_dates:
-        p = f"{base_path}/partition_date={dt}/*.parquet"
-        if fs.glob(p.replace("s3://", "")):
-            silver_paths.append(p)
+        path_mask = f"{base_path}/partition_date={dt}/*.parquet"
+
+        if fs.glob(path_mask.replace("s3://", "")):
+            silver_paths.append(path_mask)
 
     if not silver_paths:
-        logging.warning(f"No Silver files found for {table_name} in {partition_dates}")
+        logger.warning(
+            f"[{table_name}] No Silver files found for dates: {partition_dates}"
+        )
         return pl.LazyFrame()
 
-    lf_silver = pl.scan_parquet(silver_paths, storage_options=fs.storage_options)
+    lf_silver = pl.scan_parquet(silver_paths, storage_options=polars_opts)
 
-    # 2. Если не переданы ключи для Anti-Join, возвращаем Silver как есть
     if not pk_columns:
         return lf_silver
 
-    # 3. Ищем Карантинные файлы для этих же дат
     quarantine_paths = []
     for dt in partition_dates:
-        q_p = f"{quarantine_base}/partition_date={dt}/*.parquet"
-        if fs.glob(q_p.replace("s3://", "")):
-            quarantine_paths.append(q_p)
+        q_path = f"{quarantine_base}/partition_date={dt}/*.parquet"
+        if fs.glob(q_path.replace("s3://", "")):
+            quarantine_paths.append(q_path)
 
-    # 4. Если есть карантин, делаем Anti-Join
     if quarantine_paths:
-        lf_quarantine = pl.scan_parquet(
-            quarantine_paths, storage_options=fs.storage_options
-        )
+        lf_quarantine = pl.scan_parquet(quarantine_paths, storage_options=polars_opts)
 
-        # Вычитаем карантин из Silver
         lf_clean = lf_silver.join(
             lf_quarantine.select(pk_columns), on=pk_columns, how="anti"
         )
-        logging.info(
-            f"[{table_name}] Applied Quarantine Anti-Join on keys {pk_columns}"
-        )
+        logger.info(f"[{table_name}] Applied Quarantine Anti-Join on keys {pk_columns}")
         return lf_clean
 
     return lf_silver
@@ -100,10 +106,12 @@ def load_silver_dataset(
 
 def load_gold_dataset(table_name: str) -> pl.LazyFrame:
     """
-    Loads a Gold dataset from Postgres as a Polars LazyFrame.
+    Загружает Gold-датасет из Postgres через ADBC/DBAPI и конвертирует в LazyFrame.
     """
-    from gold_layer.connections import get_postgres_uri
-
     uri = get_postgres_uri()
-    df = pl.read_database(query=f"SELECT * FROM {table_name}", connection=uri)
-    return df.lazy()
+    try:
+        df = pl.read_database(query=f"SELECT * FROM {table_name}", connection=uri)
+        return df.lazy()
+    except Exception as e:
+        logger.error(f"Failed to load gold dataset {table_name}: {str(e)}")
+        raise

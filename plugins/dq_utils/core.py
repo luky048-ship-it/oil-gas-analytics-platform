@@ -1,3 +1,4 @@
+# plugins/dq_utils/core.py
 from __future__ import annotations
 
 import logging
@@ -5,11 +6,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
 import polars as pl
+from airflow.exceptions import AirflowFailException
+from core.s3_connection import get_polars_storage_options, get_s3_filesystem
 from dq_utils.business_validator import (validate_business_rules,
                                          validate_duplicate_keys,
                                          validate_null_thresholds)
-from dq_utils.dq_reporter import DQResult
-from dq_utils.s3_utils import get_s3fs_client
 from dq_utils.statistical_validator import validate_distribution_drift
 
 logger = logging.getLogger(__name__)
@@ -24,70 +25,105 @@ def execute_dq_pipeline(
     business_rules_config: Dict[str, Any],
     historical_stats: Dict[str, Tuple[float, float]],
     execution_date: str,
-    s3_options: dict,
 ) -> Tuple[List[dict], pl.DataFrame, pl.DataFrame]:
 
-    lf = pl.scan_parquet(partition_path, storage_options=s3_options)
+    logger.info(f"Starting DQ pipeline for {dataset} (date: {execution_date})")
 
-    lf = lf.cast(expected_schema)
+    try:
+        polars_opts = get_polars_storage_options()
+        fs = get_s3_filesystem()
+    except Exception as e:
+        logger.error(f"S3 Connection failed: {str(e)}")
+        raise AirflowFailException(f"S3 Connection Error: {str(e)}")
 
-    for col_name, dtype in expected_schema.items():
-        if isinstance(dtype, pl.Datetime) or dtype == pl.Datetime:
+    lf = pl.scan_parquet(partition_path, storage_options=polars_opts).cast(
+        expected_schema
+    )
+    lf = _sanitize_datetime_columns(lf, expected_schema)
+
+    results = _run_pre_materialization_checks(
+        lf, dataset, key_columns, business_rules_config, historical_stats
+    )
+    lf, rule_exprs = _apply_row_level_and_fk_rules(
+        lf, dataset, parent_joins, business_rules_config, fs, polars_opts
+    )
+
+    try:
+        df = lf.collect(streaming=True)  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"Pipeline failed at collect() for {dataset}: {str(e)}")
+
+    return _finalize_results(df, dataset, results, rule_exprs)
+
+
+def _sanitize_datetime_columns(
+    lf: pl.LazyFrame, schema: Dict[str, Any]
+) -> pl.LazyFrame:
+    for col_name, dtype in schema.items():
+        if isinstance(dtype, (pl.Datetime, pl.Date)):
             lf = lf.with_columns(pl.col(col_name).dt.truncate("1s"))
+    return lf
 
-    results_obj = []
 
-    results_obj.extend(validate_business_rules(lf, dataset))
-
-    results_obj.append(
+def _run_pre_materialization_checks(
+    lf: pl.LazyFrame, dataset: str, key_columns: List[str], config: Dict, hist: Dict
+) -> List[dict]:
+    results = validate_business_rules(lf, dataset)
+    results.append(
         validate_null_thresholds(
-            lf,
-            dataset,
-            {c: 0.0 for c in business_rules_config.get("not_null_columns", [])},
+            lf, dataset, {c: 0.0 for c in config.get("not_null_columns", [])}
         )
     )
-    results_obj.append(validate_duplicate_keys(lf, dataset, key_columns))
+    results.append(validate_duplicate_keys(lf, dataset, key_columns))
 
-    stats_cols = business_rules_config.get("statistical_monitored_columns", [])
-    if stats_cols and historical_stats:
-        results_obj.extend(
-            validate_distribution_drift(lf, dataset, stats_cols, historical_stats)
+    if config.get("statistical_monitored_columns") and hist:
+        results.extend(
+            validate_distribution_drift(
+                lf, dataset, config["statistical_monitored_columns"], hist
+            )
         )
 
-    rule_exprs: Dict[str, pl.Expr] = {}
+    return [r.__dict__ for r in results]
 
-    fs = get_s3fs_client(s3_options)
+
+def _apply_row_level_and_fk_rules(
+    lf: pl.LazyFrame,
+    dataset: str,
+    parent_joins: List[Dict],
+    config: Dict,
+    fs,
+    polars_opts,
+) -> Tuple[pl.LazyFrame, Dict[str, pl.Expr]]:
+
+    rule_exprs = {}
+    logger.debug(f"Applying row-level rules for dataset: {dataset}")
 
     for join in parent_joins:
-        child_key = join["child_key"]
-        parent_path = join["parent_path"]
+        child_key, parent_path = join["child_key"], join["parent_path"]
 
-        if fs.glob(parent_path):
-            parent_lf = (
-                pl.scan_parquet(parent_path, storage_options=s3_options)
-                .select([pl.col(join["parent_key"]).alias(child_key)])
-                .unique()
-                .with_columns(pl.lit(True).alias(f"__fk_{child_key}"))
-            )
-            lf = lf.join(parent_lf, on=child_key, how="left")
-            rule_exprs[f"fk_{child_key}"] = pl.col(f"__fk_{child_key}").fill_null(False)
-        else:
+        if not fs.glob(parent_path):
             raise AirflowFailException(
-                f"CRITICAL: Parent table path {parent_path} not found! "
-                f"Cannot validate Foreign Key '{child_key}' for dataset '{dataset}'."
+                f"Parent dataset {parent_path} missing for {dataset}"
             )
 
-    # Row-level Business Rules for splitting valid/invalid
-    for col in business_rules_config.get("not_null_columns", []):
+        parent_lf = (
+            pl.scan_parquet(parent_path, storage_options=polars_opts)
+            .select([pl.col(join["parent_key"]).alias(child_key)])
+            .unique()
+            .with_columns(pl.lit(True).alias(f"__fk_{child_key}"))
+        )
+        lf = lf.join(parent_lf, on=child_key, how="left")
+        rule_exprs[f"fk_{child_key}"] = pl.col(f"__fk_{child_key}").fill_null(False)
+
+    for col in config.get("not_null_columns", []):
         rule_exprs[f"not_null_{col}"] = pl.col(col).is_not_null()
 
-    for col, range_val in business_rules_config.get("value_ranges", {}).items():
-        min_v, max_v = range_val
+    for col, (min_v, max_v) in config.get("value_ranges", {}).items():
         cond = pl.lit(True)
         if min_v is not None:
-            cond = cond & (pl.col(col) >= min_v)
+            cond &= pl.col(col) >= min_v
         if max_v is not None:
-            cond = cond & (pl.col(col) <= max_v)
+            cond &= pl.col(col) <= max_v
         rule_exprs[f"range_{col}"] = pl.col(col).is_null() | cond
 
     validation_cols = []
@@ -96,20 +132,24 @@ def execute_dq_pipeline(
         lf = lf.with_columns(expr.alias(col_name))
         validation_cols.append(col_name)
 
-    if validation_cols:
-        lf = lf.with_columns(pl.all_horizontal(validation_cols).alias("__is_valid"))
-    else:
-        lf = lf.with_columns(pl.lit(True).alias("__is_valid"))
+    lf = lf.with_columns(
+        pl.all_horizontal(validation_cols).alias("__is_valid")
+        if validation_cols
+        else pl.lit(True)
+    )
 
-    df = lf.collect(streaming=True)
+    return lf, rule_exprs
 
+
+def _finalize_results(
+    df: pl.DataFrame, dataset: str, results: List[dict], rule_exprs: Dict
+) -> Tuple[List[dict], pl.DataFrame, pl.DataFrame]:
     created_at = datetime.now(timezone.utc).isoformat()
-    final_results = [r.__dict__ for r in results_obj]
 
     for name in rule_exprs.keys():
         col_name = f"__is_valid_{name}"
         failed_count = df.filter(~pl.col(col_name)).height
-        final_results.append(
+        results.append(
             {
                 "dataset": dataset,
                 "validation_type": f"Row-Level: {name}",
@@ -123,12 +163,8 @@ def execute_dq_pipeline(
             }
         )
 
-    for r in final_results:
-        if isinstance(r.get("created_at"), datetime):
-            r["created_at"] = r["created_at"].isoformat()
-
     internal_cols = [c for c in df.columns if c.startswith("__")]
     valid_df = df.filter(pl.col("__is_valid")).drop(internal_cols)
     invalid_df = df.filter(~pl.col("__is_valid")).drop(internal_cols)
 
-    return final_results, valid_df, invalid_df
+    return results, valid_df, invalid_df

@@ -1,9 +1,13 @@
 # plugins/bronze_to_silver/quarantine_writer.py
-from typing import Any, Dict
+import logging
 
 import polars as pl
 import pyarrow.dataset as ds
-from pyarrow import fs
+from airflow.exceptions import AirflowException
+from core.s3_connection import get_s3_filesystem
+from pyarrow.fs import FSSpecHandler, PyFileSystem
+
+logger = logging.getLogger(__name__)
 
 
 def write_quarantine_dataset(
@@ -11,49 +15,64 @@ def write_quarantine_dataset(
     dataset: str,
     reason_code: str,
     execution_date: str,
-    storage_options: Dict[str, Any],
     base_path: str = "s3://datalake/quarantine",
 ) -> int:
     """
-    Enriches invalid records with metadata and writes them to the Quarantine layer.
-    Returns the number of quarantined rows.
+    Записывает невалидные записи в карантин.
+    Использует централизованный S3-клиент и обеспечивает строгий контроль ошибок.
     """
-    # Enrich with execution metadata
-    enriched_lf = invalid_lf.with_columns(
-        [
-            pl.lit(execution_date).alias("_quarantine_execution_date"),
-            pl.lit(dataset).alias("_quarantine_source_dataset"),
-            pl.lit(execution_date).alias("partition_date"),  # For Hive partitioning
-        ]
+    logger.info(
+        f"Starting quarantine process for dataset: {dataset}. Reason: {reason_code}"
     )
 
-    # Materialize the invalid records (expected to be a small subset)
-    invalid_df = enriched_lf.collect()
-    q_rows = invalid_df.height
+    # 1. Обогащение данными (метаданные)
+    try:
+        enriched_lf = invalid_lf.with_columns(
+            [
+                pl.lit(execution_date).alias("_quarantine_execution_date"),
+                pl.lit(dataset).alias("_quarantine_source_dataset"),
+                pl.lit(execution_date).alias("partition_date"),
+            ]
+        )
+
+        # Коллектим только после того, как все трансформации готовы
+        invalid_df = enriched_lf.collect()
+        q_rows = invalid_df.height
+    except Exception as e:
+        logger.error(f"Failed to enrich or collect quarantine data for {dataset}: {e}")
+        raise AirflowException(f"Quarantine enrichment failed: {e}")
 
     if q_rows == 0:
+        logger.info(f"No invalid records found for dataset {dataset}. Skipping write.")
         return 0
 
-    # Configure PyArrow S3 filesystem
-    s3_fs = fs.S3FileSystem(
-        access_key=storage_options.get("aws_access_key_id"),
-        secret_key=storage_options.get("aws_secret_access_key"),
-        endpoint_override=storage_options.get("aws_endpoint_url"),
-        region=storage_options.get("aws_region", "us-east-1"),
-    )
+    # 2. Подготовка файловой системы
+    try:
+        s3_fs = get_s3_filesystem()
+        pa_fs = PyFileSystem(FSSpecHandler(s3_fs))
+    except Exception as e:
+        logger.error(f"Failed to initialize S3 filesystem for quarantine: {e}")
+        raise AirflowException("Could not connect to S3 for quarantine write.")
 
-    # Convert to Arrow Table and write
-    arrow_table = invalid_df.to_arrow()
+    # 3. Запись
     target_dir = f"{base_path.replace('s3://', '')}/{dataset}"
+    logger.info(f"Writing {q_rows} records to quarantine at {target_dir}")
 
-    ds.write_dataset(
-        data=arrow_table,
-        base_dir=target_dir,
-        filesystem=s3_fs,
-        format="parquet",
-        partitioning=ds.partitioning(field_names=["partition_date"]),
-        existing_data_behavior="overwrite_or_ignore",
-        max_partitions=1024,
-    )
+    try:
+        ds.write_dataset(
+            data=invalid_df.to_arrow(),
+            base_dir=target_dir,
+            filesystem=pa_fs,
+            format="parquet",
+            partitioning=ds.partitioning(field_names=["partition_date"]),
+            existing_data_behavior="overwrite_or_ignore",
+            max_partitions=1024,
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to write parquet to quarantine storage for {dataset}: {e}"
+        )
+        raise AirflowException(f"IO Error writing to quarantine: {e}")
 
+    logger.info(f"Successfully quarantined {q_rows} rows for {dataset}.")
     return q_rows

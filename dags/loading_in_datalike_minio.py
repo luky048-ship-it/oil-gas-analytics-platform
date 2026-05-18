@@ -7,7 +7,7 @@ import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -144,7 +144,7 @@ EXPECTED_SCHEMAS: Dict[str, pa.Schema] = {
         [
             ("record_id", pa.int32()),
             ("well_id", pa.int32()),
-            ("timestamp", pa.timestamp("s")),
+            ("timestamp", pa.timestamp("us")),
             ("pump_speed_rpm", pa.decimal128(8, 2)),
             ("pump_current", pa.decimal128(8, 2)),
             ("pressure_in", pa.decimal128(8, 2)),

@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-import s3fs
 from airflow.exceptions import AirflowFailException
 from dq_utils.dq_reporter import DQResult
 from dq_utils.s3_utils import get_s3fs_client

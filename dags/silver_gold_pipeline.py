@@ -1,7 +1,6 @@
 import logging
 from datetime import datetime, timedelta
 
-import polars as pl
 from airflow.decorators import dag, task, task_group
 from airflow.exceptions import AirflowSkipException
 from airflow.providers.postgres.hooks.postgres import PostgresHook
@@ -10,12 +9,7 @@ from gold_layer.builders.mart_failures import build_mart_failures
 from gold_layer.builders.mart_logistics import build_mart_logistics
 from gold_layer.builders.mart_production import build_mart_production
 from gold_layer.builders.mart_well_kpi import build_mart_well_kpi
-from gold_layer.constants import (SILVER_DELIVERIES, SILVER_DRIVERS,
-                                  SILVER_PRODUCTION, SILVER_PUMP_FAILURES,
-                                  SILVER_PUMP_SENSORS, SILVER_TARGETS,
-                                  SILVER_TELEMETRY, SILVER_VEHICLES,
-                                  TABLE_MART_FAILURES, TABLE_MART_LOGISTICS,
-                                  TABLE_MART_PRODUCTION, TABLE_MART_WELL_KPI)
+from gold_layer.constants import SILVER_PRODUCTION, TABLE_MART_PRODUCTION
 from gold_layer.loaders import (discover_new_partitions, load_gold_dataset,
                                 load_silver_dataset)
 from gold_layer.publishers import (atomic_partition_overwrite, cleanup_staging,

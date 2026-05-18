@@ -1,33 +1,67 @@
-import os
+import logging
+from typing import Any, Dict
+
 import s3fs
-import psycopg2
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.providers.amazon.aws.hooks.base_aws import AwsGenericHook
-from gold_layer.constants import POSTGRES_CONN_ID, AWS_CONN_ID
+from core.s3_connection import get_polars_storage_options, get_s3_filesystem
+
+from gold_layer.constants import POSTGRES_CONN_ID
+
+logger = logging.getLogger(__name__)
+
 
 def get_s3_fs() -> s3fs.S3FileSystem:
-    """Returns a configured s3fs filesystem using Airflow AWS connection."""
-    aws_hook = AwsGenericHook(aws_conn_id=AWS_CONN_ID, client_type="s3")
-    creds = aws_hook.get_credentials()
+    """
+    Возвращает готовый объект S3FileSystem с логированием процесса инициализации.
+    """
+    try:
+        logger.info("Attempting to initialize S3FileSystem...")
+        fs = get_s3_filesystem()
+        logger.info("S3FileSystem successfully initialized.")
+        return fs
+    except Exception as e:
+        logger.error(f"Failed to initialize S3FileSystem: {str(e)}", exc_info=True)
+        raise
 
-    # Check if we are using MinIO (standard for this project based on README/previous logs)
-    endpoint_url = os.getenv("MINIO_ENDPOINT_URL", "http://minio:9000")
 
-    return s3fs.S3FileSystem(
-        key=creds.access_key,
-        secret=creds.secret_key,
-        token=creds.token,
-        client_kwargs={'endpoint_url': endpoint_url},
-        use_ssl=False if "http://" in endpoint_url else True
-    )
+def get_s3_polars_opts() -> Dict[str, Any]:
+    """
+    Возвращает настройки Polars с проверкой на наличие ключей.
+    """
+    try:
+        logger.debug("Retrieving Polars storage options...")
+        opts = get_polars_storage_options()
+        # Проверяем, что словарь не пустой (защита от кривой конфигурации)
+        if not opts:
+            raise ValueError("Polars storage options returned empty dictionary.")
+        return opts
+    except Exception as e:
+        logger.error(
+            f"Error retrieving Polars storage options: {str(e)}", exc_info=True
+        )
+        raise
+
 
 def get_postgres_uri() -> str:
-    """Returns Postgres URI for ADBC driver."""
-    hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
-    conn = hook.get_connection(POSTGRES_CONN_ID)
-    return f"postgresql://{conn.login}:{conn.password}@{conn.host}:{conn.port}/{conn.schema}"
+    """Возвращает Postgres URI для ADBC driver с логированием подключения."""
+    try:
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        conn = hook.get_connection(POSTGRES_CONN_ID)
+        logger.debug(f"Postgres connection {POSTGRES_CONN_ID} retrieved successfully.")
+        return f"postgresql://{conn.login}:{conn.password}@{conn.host}:{conn.port}/{conn.schema}"
+    except Exception as e:
+        logger.error(
+            f"Failed to build Postgres URI for {POSTGRES_CONN_ID}: {str(e)}",
+            exc_info=True,
+        )
+        raise
+
 
 def get_psycopg2_conn():
-    """Returns a standard psycopg2 connection."""
-    hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
-    return hook.get_conn()
+    """Возвращает стандартное соединение psycopg2."""
+    try:
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        return hook.get_conn()
+    except Exception as e:
+        logger.error(f"Failed to get psycopg2 connection: {str(e)}", exc_info=True)
+        raise

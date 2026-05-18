@@ -1,13 +1,14 @@
-import polars as pl
-import pyarrow as pa
 import logging
+
+import polars as pl
 from adbc_driver_postgresql import dbapi as adbc_dbapi
 from gold_layer.connections import get_postgres_uri, get_psycopg2_conn
 from gold_layer.constants import STAGING_SCHEMA
-from gold_layer.sql_templates import (
-    CREATE_STAGING_TABLE, DROP_STAGING_TABLE,
-    DELETE_PARTITION_FROM_GOLD, INSERT_FROM_STAGING_TO_GOLD
-)
+from gold_layer.sql_templates import (CREATE_STAGING_TABLE,
+                                      DELETE_PARTITION_FROM_GOLD,
+                                      DROP_STAGING_TABLE,
+                                      INSERT_FROM_STAGING_TO_GOLD)
+
 
 def write_staging_mart(df: pl.DataFrame, mart_name: str) -> str:
     """
@@ -21,10 +22,11 @@ def write_staging_mart(df: pl.DataFrame, mart_name: str) -> str:
     # 1. Create/Truncate staging table
     with get_psycopg2_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(CREATE_STAGING_TABLE.format(
-                staging_table=staging_table,
-                target_table=target_table
-            ))
+            cur.execute(
+                CREATE_STAGING_TABLE.format(
+                    staging_table=staging_table, target_table=target_table
+                )
+            )
         conn.commit()
 
     # 2. Write data using ADBC for high performance
@@ -40,7 +42,10 @@ def write_staging_mart(df: pl.DataFrame, mart_name: str) -> str:
     logging.info(f"Loaded {len(df)} rows into {staging_table}")
     return staging_table
 
-def atomic_partition_overwrite(mart_name: str, staging_table: str, partition_dates: list):
+
+def atomic_partition_overwrite(
+    mart_name: str, staging_table: str, partition_dates: list
+):
     """
     Transactional DELETE + INSERT for each partition_date.
     Ensures that Gold layer is updated atomically for all affected dates.
@@ -52,13 +57,18 @@ def atomic_partition_overwrite(mart_name: str, staging_table: str, partition_dat
             for dt in partition_dates:
                 logging.info(f"Overwriting partition {dt} in {target_table}")
                 # Atomic swap for this date
-                cur.execute(DELETE_PARTITION_FROM_GOLD.format(target_table=target_table), (dt,))
-                cur.execute(INSERT_FROM_STAGING_TO_GOLD.format(
-                    target_table=target_table,
-                    staging_table=staging_table
-                ), (dt,))
+                cur.execute(
+                    DELETE_PARTITION_FROM_GOLD.format(target_table=target_table), (dt,)
+                )
+                cur.execute(
+                    INSERT_FROM_STAGING_TO_GOLD.format(
+                        target_table=target_table, staging_table=staging_table
+                    ),
+                    (dt,),
+                )
         conn.commit()
     logging.info(f"Successfully updated {target_table} for dates: {partition_dates}")
+
 
 def cleanup_staging(staging_table: str):
     """Drops the staging table."""
