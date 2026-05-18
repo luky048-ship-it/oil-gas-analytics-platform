@@ -1,64 +1,59 @@
 import polars as pl
-from datetime import datetime
-from gold_layer.config import ANALYSIS_PARAMS
+
 
 def build_mart_well_kpi(
-    lf_mart_production: pl.LazyFrame,
-    lf_gold_history: pl.LazyFrame
+    lf_prod: pl.LazyFrame, lf_history: pl.LazyFrame
 ) -> pl.LazyFrame:
-    """
-    Builds mart_well_kpi LazyFrame.
-    """
-    window = ANALYSIS_PARAMS["kpi_rolling_window"]
 
-    # Combine history and new batch to ensure correct windowing
-    combined = pl.concat([
-        lf_gold_history.select(lf_mart_production.collect_schema().names()),
-        lf_mart_production
-    ]).unique(subset=["well_id", "date"], keep="last")
+    combined = lf_prod.select(["well_id", "date", "oil_ton", "downtime_hours"])
 
-    # 1. Rolling and Cumulative metrics
-    kpi_lf = (
-        combined
-        .sort(["well_id", "date"])
-        .with_columns([
-            pl.col("oil_ton").rolling_mean(window_size=window).over("well_id").alias("avg_daily_oil"),
-            pl.col("oil_ton").cum_sum().over("well_id").alias("total_oil"),
-            pl.col("downtime_pct").rolling_mean(window_size=window).over("well_id").alias("avg_downtime_pct"),
-            pl.col("production_efficiency").rolling_mean(window_size=window).over("well_id").alias("avg_efficiency"),
-            pl.col("oil_ton").max().over("well_id").alias("best_day_oil"),
-            pl.col("oil_ton").min().over("well_id").alias("worst_day_oil")
-        ])
+    kpi = combined.group_by("well_id").agg(
+        [
+            pl.col("oil_ton").mean().alias("avg_daily_oil"),
+            pl.col("oil_ton").sum().alias("total_oil"),
+            pl.col("oil_ton").max().alias("best_day_oil"),
+            pl.col("oil_ton").min().alias("worst_day_oil"),
+            (pl.col("downtime_hours").sum() / (pl.len() * 24)).alias(
+                "avg_downtime_pct"
+            ),
+        ]
     )
 
-    # 2. Ranking and Performance Groups
-    kpi_lf = (
-        kpi_lf
-        .with_columns(
-            pl.col("oil_ton").rank(descending=True).over("date").alias("production_rank")
-        )
-        .with_columns(
-            pl.when(pl.col("production_rank") <= 10).then(pl.lit("Top"))
-            .when(pl.col("production_rank") <= 30).then(pl.lit("Good"))
-            .when(pl.col("production_rank") <= 70).then(pl.lit("Average"))
-            .otherwise(pl.lit("Poor"))
-            .alias("performance_group")
-        )
+    # Ранжирование
+    kpi = kpi.with_columns(
+        [
+            pl.col("total_oil")
+            .rank(descending=True)
+            .alias("production_rank")
+            .cast(pl.Int32)
+        ]
     )
 
-    kpi_lf = kpi_lf.with_columns([
-        pl.lit(datetime.now()).alias("load_timestamp"),
-        pl.col("date").alias("partition_date")
-    ])
+    # Группировка по перфомансу
+    kpi = kpi.with_columns(
+        pl.when(pl.col("production_rank") <= 3)
+        .then(pl.lit("Top"))
+        .when(pl.col("production_rank") <= 10)
+        .then(pl.lit("Good"))
+        .otherwise(pl.lit("Average"))
+        .alias("performance_group")
+    )
 
-    target_dates = lf_mart_production.select("date").unique()
+    # Добавляем дату
+    max_date = lf_prod.select(pl.col("date").max()).collect().item()
+    kpi = kpi.with_columns(pl.lit(max_date).alias("date"))
 
-    return (
-        kpi_lf
-        .join(target_dates, on="date", how="inner")
-        .select([
-            "well_id", "date", "avg_daily_oil", "total_oil", "avg_downtime_pct",
-            "avg_efficiency", "best_day_oil", "worst_day_oil", "production_rank",
-            "performance_group", "load_timestamp", "partition_date"
-        ])
+    # ФИНАЛЬНЫЙ КАСТ
+    return kpi.select(
+        [
+            pl.col("well_id").cast(pl.Int32),
+            pl.col("date").cast(pl.Date),
+            pl.col("avg_daily_oil").cast(pl.Decimal(12, 3)),
+            pl.col("total_oil").cast(pl.Decimal(14, 3)),
+            pl.col("avg_downtime_pct").cast(pl.Decimal(6, 3)),
+            pl.col("best_day_oil").cast(pl.Decimal(12, 3)),
+            pl.col("worst_day_oil").cast(pl.Decimal(12, 3)),
+            pl.col("production_rank"),
+            pl.col("performance_group").cast(pl.String),
+        ]
     )

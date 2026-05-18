@@ -77,7 +77,7 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "columns": {
             "record_id": pl.Int32(),
             "well_id": pl.Int32(),
-            "timestamp": pl.Datetime("us"),  # или "ms" — унифицировать с ETL
+            "timestamp": pl.Datetime("us"),
             "pump_speed_rpm": pl.Decimal(8, 2),
             "pump_current": pl.Decimal(8, 2),
             "pressure_in": pl.Decimal(8, 2),

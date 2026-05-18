@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import logging
+import typing
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
 import polars as pl
 from airflow.exceptions import AirflowFailException
+
 from core.s3_connection import get_polars_storage_options, get_s3_filesystem
 from dq_utils.business_validator import (validate_business_rules,
                                          validate_duplicate_keys,
@@ -19,7 +21,7 @@ logger = logging.getLogger(__name__)
 def execute_dq_pipeline(
     dataset: str,
     partition_path: str,
-    expected_schema: Dict[str, Any],
+    expected_schema: Dict[str, pl.DataType],
     key_columns: List[str],
     parent_joins: List[Dict[str, str]],
     business_rules_config: Dict[str, Any],
@@ -37,8 +39,9 @@ def execute_dq_pipeline(
         raise AirflowFailException(f"S3 Connection Error: {str(e)}")
 
     lf = pl.scan_parquet(partition_path, storage_options=polars_opts).cast(
-        expected_schema
+        typing.cast(Any, expected_schema)
     )
+
     lf = _sanitize_datetime_columns(lf, expected_schema)
 
     results = _run_pre_materialization_checks(
@@ -49,7 +52,7 @@ def execute_dq_pipeline(
     )
 
     try:
-        df = lf.collect(streaming=True)  # type: ignore
+        df = lf.collect(engine="streaming")
     except Exception as e:
         raise RuntimeError(f"Pipeline failed at collect() for {dataset}: {str(e)}")
 
@@ -59,9 +62,15 @@ def execute_dq_pipeline(
 def _sanitize_datetime_columns(
     lf: pl.LazyFrame, schema: Dict[str, Any]
 ) -> pl.LazyFrame:
+
+    datetime_exprs = []
+
     for col_name, dtype in schema.items():
         if isinstance(dtype, (pl.Datetime, pl.Date)):
-            lf = lf.with_columns(pl.col(col_name).dt.truncate("1s"))
+            datetime_exprs.append(pl.col(col_name).cast(pl.Datetime("us")))
+    if datetime_exprs:
+        lf = lf.with_columns(datetime_exprs)
+
     return lf
 
 

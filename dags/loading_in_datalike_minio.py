@@ -175,7 +175,7 @@ EXPECTED_SCHEMAS: Dict[str, pa.Schema] = {
         [
             ("record_id", pa.int32()),
             ("pump_id", pa.int32()),
-            ("timestamp", pa.timestamp("s")),
+            ("timestamp", pa.timestamp("us")),
             ("temperature", pa.decimal128(5, 2)),
             ("vibration", pa.decimal128(5, 2)),
             ("current", pa.decimal128(8, 2)),
@@ -187,7 +187,7 @@ EXPECTED_SCHEMAS: Dict[str, pa.Schema] = {
         [
             ("failure_id", pa.int32()),
             ("pump_id", pa.int32()),
-            ("failure_date", pa.timestamp("s")),
+            ("failure_date", pa.timestamp("us")),
             ("failure_type", pa.string()),
             ("downtime_hours", pa.decimal128(5, 2)),
         ]
