@@ -1,6 +1,6 @@
 # plugins/bronze_to_silver/s3_utils.py
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, Dict, List, Optional
 
 import polars as pl
@@ -49,7 +49,19 @@ def load_bronze_dataset(
 
         if watermark and time_column:
             logger.info(f"Applying watermark filter: {time_column} >= {watermark}")
-            lf = lf.filter(pl.col(time_column) >= watermark)
+            # Приводим watermark к типу колонки для корректного сравнения
+            column_schema = lf.collect_schema()
+            if time_column in column_schema:
+                column_type = column_schema[time_column]
+                # Если колонка имеет тип Date, приводим datetime к date
+                if column_type == pl.Date:
+                    filter_val = watermark.date() if isinstance(watermark, datetime) else watermark
+                elif column_type == pl.Datetime:
+                    filter_val = watermark
+                else:
+                    # Для остальных типов используем как есть
+                    filter_val = watermark
+                lf = lf.filter(pl.col(time_column) >= filter_val)
 
         return lf
 

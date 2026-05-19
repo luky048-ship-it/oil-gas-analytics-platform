@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 def validate_dataset_schema(
     lf: pl.LazyFrame, dataset: str, expected_schema: Dict[str, pl.DataType]
 ) -> None:
+    """
+    Проверяет схему данных после нормализации.
+    Валидатор проверяет наличие всех обязательных колонок и соответствие типов.
+    После нормализации типы должны совпадать с контрактом.
+    """
     actual_schema = lf.collect_schema()
 
     missing_columns = []

@@ -16,14 +16,32 @@ def write_silver_dataset(
     partition_date: str,
     silver_base: str = "s3://datalake/silver",
     storage_options: dict = None,
+    time_column: str = None,
 ) -> str:
     """
     Записывает LazyFrame в Silver слой с Hive-партиционированием.
+    Партиция строится из Event Time данных, а не из даты запуска DAG.
     """
 
-    lf_partitioned = lf.with_columns(
-        pl.lit(partition_date).str.to_date("%Y-%m-%d").alias("partition_date")
-    )
+    # Если указан time_column, используем его для партиционирования (Event Time)
+    # Это предотвращает проблемы с Late Arriving Data
+    if time_column:
+        try:
+            lf_partitioned = lf.with_columns(
+                pl.col(time_column).dt.date().alias("partition_date")
+            )
+        except Exception:
+            # Если не удалось извлечь дату из time_column, fallback на execution_date
+            logger.warning(
+                f"Failed to extract date from {time_column}, using execution_date as fallback"
+            )
+            lf_partitioned = lf.with_columns(
+                pl.lit(partition_date).str.to_date("%Y-%m-%d").alias("partition_date")
+            )
+    else:
+        lf_partitioned = lf.with_columns(
+            pl.lit(partition_date).str.to_date("%Y-%m-%d").alias("partition_date")
+        )
 
     try:
         s3_fs = get_s3_filesystem()

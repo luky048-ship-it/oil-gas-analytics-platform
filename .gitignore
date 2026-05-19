@@ -1,90 +1,87 @@
-# =====================
-# Python / Jupyter
-# =====================
+```
+# Python
 __pycache__/
-*.py[cod]
-*.so
+*.pyc
+*.pyo
+*.pyd
 .Python
 env/
 venv/
 .venv/
-ENV/
-.env
-*.egg-info/
-dist/
-build/
-
-# Jupyter Notebook
-.ipynb_checkpoints/
-*.ipynb_checkpoints
-*/.ipynb_checkpoints/*
-*.pkl
-*.pickle
-*.joblib
-
-# =====================
-# Docker / volumes (локальные данные)
-# =====================
-# PostgreSQL data
-postgres-data/
-pgdata/
-
-# MinIO data
-minio-data/
-minio/
-*.minio.sys
-
-# Superset local configs / metadata
-superset.db
-superset_config.py
-*.superset.db
-superset_home/
-*.json 
-
-# Airflow
-airflow.db
-airflow.cfg
-logs/
-airflow-webserver.pid
-*.pid
-
-# =====================
-# IDE / OS
-# =====================
-.vscode/
-.idea/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+*.pot
+*.pyc
+*.pyo
+*.pyd
+.MF
 *.swp
 *.swo
 *~
 .DS_Store
 Thumbs.db
-desktop.ini
 
-# =====================
-# Project specific (локальные данные и артефакты)
-# =====================
-/data/raw/
-/data/processed/
-/data/external/
-*.parquet
-*.csv
-!test_*.csv   
-*.log
-*.tmp
+# Jupyter Notebook
+.ipynb_checkpoints
 
-# ML models
-models/*.pkl
-models/*.joblib
-!models/.gitkeep
-
-# Environment variables
+# Local configuration file (may contain sensitive data)
 .env
-.env.local
-.env.*.local
 
-# =====================
-# macOS / Linux / Windows
-# =====================
-.directory
-*.lnk
+# Spark/Databricks related
+metastore_db/
+derby.log
+*.lck
 
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Coverage reports
+coverage/
+htmlcov/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# PyTest
+.pytest_cache/
+
+# VSCode
+.vscode/
+
+# IntelliJ IDEA
+.idea/
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing
+.pytest_cache/
+.hypothesis/
+```
