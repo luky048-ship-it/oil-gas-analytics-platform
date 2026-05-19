@@ -45,11 +45,21 @@ def validate_critical_rules(
     is_invalid = pl.any_horizontal(*conditions).fill_null(False)
 
     valid_lf = lf.filter(~is_invalid)
-    invalid_lf = lf.filter(is_invalid).with_columns(
-        [
-            pl.lit("PHYSICAL_LIMIT_VIOLATION").alias("_quarantine_reason_code"),
-            pl.lit("BUSINESS_VALIDATION").alias("_quarantine_validation_name"),
-        ]
-    )
+    
+    # Проверяем, есть ли вообще невалидные записи
+    invalid_count = valid_lf.select(pl.len().alias("valid_count")).collect().item()
+    total_count = lf.select(pl.len().alias("total_count")).collect().item()
+    
+    if invalid_count == total_count:
+        # Все записи валидны
+        invalid_lf = None
+    else:
+        # Есть невалидные записи
+        invalid_lf = lf.filter(is_invalid).with_columns(
+            [
+                pl.lit("PHYSICAL_LIMIT_VIOLATION").alias("_quarantine_reason_code"),
+                pl.lit("BUSINESS_VALIDATION").alias("_quarantine_validation_name"),
+            ]
+        )
 
     return valid_lf, invalid_lf

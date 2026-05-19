@@ -30,19 +30,29 @@ def detect_outliers(
             lower_bound = q1 - (multiplier * iqr)
             upper_bound = q3 + (multiplier * iqr)
 
-            condition = (col_float < lower_bound) | (col_float > upper_bound)
+            # NULL values should not be considered outliers
+            # Only mark as outlier if value is not null AND outside bounds
+            condition = pl.col(col).is_not_null() & ((col_float < lower_bound) | (col_float > upper_bound))
             outlier_conditions.append(condition)
 
     is_outlier_expr = pl.any_horizontal(*outlier_conditions).fill_null(False)
 
     valid_lf = lf.filter(~is_outlier_expr)
-    invalid_lf = lf.filter(is_outlier_expr)
-
-    invalid_lf = invalid_lf.with_columns(
-        [
-            pl.lit("OUTLIER_DETECTION").alias("_quarantine_validation_name"),
-            pl.lit(f"{method.upper()}_VIOLATION").alias("_quarantine_reason_code"),
-        ]
-    )
+    
+    # Проверяем, есть ли вообще выбросы
+    outlier_count = valid_lf.select(pl.len().alias("valid_count")).collect().item()
+    total_count = lf.select(pl.len().alias("total_count")).collect().item()
+    
+    if outlier_count == total_count:
+        # Все записи валидны, выбросов нет
+        invalid_lf = None
+    else:
+        # Есть выбросы
+        invalid_lf = lf.filter(is_outlier_expr).with_columns(
+            [
+                pl.lit("OUTLIER_DETECTION").alias("_quarantine_validation_name"),
+                pl.lit(f"{method.upper()}_VIOLATION").alias("_quarantine_reason_code"),
+            ]
+        )
 
     return valid_lf, invalid_lf

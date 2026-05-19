@@ -3,7 +3,13 @@ import logging
 from typing import Dict
 
 import polars as pl
-from airflow.exceptions import AirflowFailException
+
+try:
+    from airflow.exceptions import AirflowFailException
+except ImportError:
+    # Fallback for testing without airflow installed
+    class AirflowFailException(Exception):
+        pass
 
 logger = logging.getLogger(__name__)
 
