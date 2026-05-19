@@ -56,8 +56,12 @@ def load_bronze_dataset(
                 # Если колонка имеет тип Date, приводим datetime к date
                 if column_type == pl.Date:
                     filter_val = watermark.date() if isinstance(watermark, datetime) else watermark
-                elif column_type == pl.Datetime:
-                    filter_val = watermark
+                elif column_type.base_type() == pl.Datetime:
+                    # Handle timezone mismatch between tz-aware watermark and tz-naive parquet columns
+                    if getattr(column_type, "time_zone", None) is None and getattr(watermark, "tzinfo", None):
+                        filter_val = watermark.replace(tzinfo=None)
+                    else:
+                        filter_val = watermark
                 else:
                     # Для остальных типов используем как есть
                     filter_val = watermark

@@ -22,7 +22,10 @@ def enrich_reference_data(
         hive_partitioning=True,
     )
 
+    # Drop technical columns from reference to avoid DuplicateError on join
+    safe_ref_lf = ref_lf.drop(["_silver_processed_at", "partition_date"], strict=False)
+
     # Perform lazy join
-    enriched_lf = lf.join(ref_lf, on=join_key, how=how)
+    enriched_lf = lf.join(safe_ref_lf, on=join_key, how=how)
 
     return enriched_lf

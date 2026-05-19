@@ -87,10 +87,10 @@ with DAG(
             time_column=contract.get("time_column"),
         )
 
-        # Сначала нормализация (приведение типов), затем валидация схемы
-        # Это позволяет легально кастить Decimal -> Float64 и другие совместимые типы
-        lf = normalize_dataset(lf, dataset, contract)
+        # Сначала валидация схемы (до нормализации), чтобы корректно детектить дрифт и missing cols
+        # Затем нормализация для приведения типов к контракту
         validate_dataset_schema(lf, dataset, contract["columns"])
+        lf = normalize_dataset(lf, dataset, contract)
 
         valid_lf, business_invalid_lf = validate_critical_rules(
             lf, contract.get("validation_rules", {})
@@ -154,6 +154,24 @@ with DAG(
         else:
             logger.info(f"No invalid records to quarantine for {dataset}.")
 
+        # Collect strictly before aggregation to prevent double execution and compute accurate watermark
+        valid_df = valid_lf.collect()
+        
+        time_col = contract.get("time_column")
+        
+        if time_col:
+            new_watermark = valid_df[time_col].max()
+        else:
+            new_watermark = None
+            
+        processed_rows = len(valid_df)
+
+        if not new_watermark:
+            new_watermark = watermark or datetime.strptime(execution_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+        # Convert back to LazyFrame for downstream pipeline operations
+        valid_lf = valid_df.lazy()
+
         if "aggregation" in contract:
             valid_lf = aggregate_event_time_metrics(
                 valid_lf, dataset, contract["aggregation"]
@@ -177,18 +195,8 @@ with DAG(
             time_column=contract.get("time_column"),
         )
 
-        time_col = contract.get("time_column")
-
-        if time_col and "aggregation" not in contract:
-            metrics_df = valid_lf.select(
-                [pl.len().alias("count"), pl.col(time_col).max().alias("max_time")]
-            ).collect()
-
-            processed_rows = metrics_df["count"].item(0)
-            new_watermark = metrics_df["max_time"].item(0)
-        else:
-            processed_rows = valid_lf.select(pl.len()).collect().item()
-            new_watermark = None
+        # Watermark and processed_rows already computed above before aggregation/joins
+        # No need to re-collect here
 
         if not new_watermark:
             new_watermark = watermark or datetime.strptime(execution_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)

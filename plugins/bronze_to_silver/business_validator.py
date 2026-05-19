@@ -42,7 +42,7 @@ def validate_critical_rules(
     if not conditions:
         return lf, None
 
-    is_invalid = pl.any_horizontal(*conditions)
+    is_invalid = pl.any_horizontal(*conditions).fill_null(False)
 
     valid_lf = lf.filter(~is_invalid)
     
