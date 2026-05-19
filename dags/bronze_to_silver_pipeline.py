@@ -9,6 +9,7 @@ from airflow import DAG
 from airflow.decorators import task
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.task_group import TaskGroup
+from bronze_to_silver.business_validator import validate_critical_rules
 from bronze_to_silver.config import SCHEMA_CONTRACTS
 from bronze_to_silver.deduplicator import deduplicate_dataset
 from bronze_to_silver.enricher import enrich_reference_data
@@ -87,34 +88,47 @@ with DAG(
         )
 
         validate_dataset_schema(lf, dataset, contract["columns"])
-
         lf = normalize_dataset(lf, dataset, contract)
 
-        lf = deduplicate_dataset(
-            lf,
+        valid_lf, business_invalid_lf = validate_critical_rules(
+            lf, contract.get("validation_rules", {})
+        )
+
+        valid_lf = deduplicate_dataset(
+            valid_lf,
             key_columns=contract.get("dedup_key"),
             timestamp_column=contract.get("time_column"),
         )
 
-        lf = handle_missing_values(lf, dataset, contract.get("missing_rules", {}))
+        valid_lf = handle_missing_values(
+            valid_lf, dataset, contract.get("missing_rules", {})
+        )
 
-        valid_lf, invalid_lf = detect_outliers(
-            lf,
+        valid_lf, outlier_invalid_lf = detect_outliers(
+            valid_lf,
             dataset,
             monitored_columns=contract.get("outlier_columns", []),
             method="iqr",
             multiplier=3.0,
         )
 
+        all_invalid_lfs = []
+        if business_invalid_lf is not None:
+            all_invalid_lfs.append(business_invalid_lf)
+        if outlier_invalid_lf is not None:
+            all_invalid_lfs.append(outlier_invalid_lf)
+
         q_rows = 0
-        if invalid_lf is not None:
+        if all_invalid_lfs:
+            final_invalid_lf = pl.concat(all_invalid_lfs)
             q_rows = write_quarantine_dataset(
-                invalid_lf=invalid_lf,
+                invalid_lf=final_invalid_lf,
                 dataset=dataset,
-                reason_code="STATISTICAL_OUTLIER",
+                reason_code="DQ_VIOLATION",
                 execution_date=execution_date,
                 storage_options=storage_options,
             )
+        # ----------------------------------------------------
 
         if "aggregation" in contract:
             valid_lf = aggregate_event_time_metrics(
@@ -125,7 +139,7 @@ with DAG(
             for join_def in contract["joins"]:
                 valid_lf = enrich_reference_data(
                     lf=valid_lf,
-                    reference_dataset_path=f"s3://datalake/silver/{join_def['ref_dataset']}",
+                    reference_dataset=f"s3://datalake/silver/{join_def['ref_dataset']}",
                     join_key=join_def["key"],
                     storage_options=storage_options,
                     how=join_def.get("how", "left"),
@@ -149,10 +163,10 @@ with DAG(
             new_watermark = metrics_df["max_time"].item(0)
         else:
             processed_rows = valid_lf.select(pl.len()).collect().item()
-            new_watermark = None  # Handled below
+            new_watermark = None
 
         if not new_watermark:
-            new_watermark = datetime.strptime(execution_date, "%Y-%m-%d")
+            new_watermark = watermark or datetime.strptime(execution_date, "%Y-%m-%d")
 
         t_end = datetime.now()
         execution_time = (t_end - t_start).total_seconds()
@@ -177,7 +191,6 @@ with DAG(
         )
         return result.__dict__
 
-    # Dynamically generate tasks for all datasets defined in the contract
     for ds_name in SCHEMA_CONTRACTS.keys():
         with TaskGroup(group_id=f"process_group_{ds_name}") as tg:
 

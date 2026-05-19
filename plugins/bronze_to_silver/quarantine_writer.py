@@ -2,6 +2,7 @@
 import logging
 
 import polars as pl
+import pyarrow as pa
 import pyarrow.dataset as ds
 from airflow.exceptions import AirflowException
 from core.s3_connection import get_s3_filesystem
@@ -16,6 +17,7 @@ def write_quarantine_dataset(
     reason_code: str,
     execution_date: str,
     base_path: str = "s3://datalake/quarantine",
+    storage_options: dict = None,
 ) -> int:
     """
     Записывает невалидные записи в карантин.
@@ -25,19 +27,18 @@ def write_quarantine_dataset(
         f"Starting quarantine process for dataset: {dataset}. Reason: {reason_code}"
     )
 
-    # 1. Обогащение данными (метаданные)
     try:
         enriched_lf = invalid_lf.with_columns(
             [
                 pl.lit(execution_date).alias("_quarantine_execution_date"),
                 pl.lit(dataset).alias("_quarantine_source_dataset"),
-                pl.lit(execution_date).alias("partition_date"),
+                pl.lit(execution_date).str.to_date("%Y-%m-%d").alias("partition_date"),
             ]
         )
 
-        # Коллектим только после того, как все трансформации готовы
-        invalid_df = enriched_lf.collect()
-        q_rows = invalid_df.height
+        arrow_table = enriched_lf.collect().to_arrow()
+        q_rows = arrow_table.num_rows
+
     except Exception as e:
         logger.error(f"Failed to enrich or collect quarantine data for {dataset}: {e}")
         raise AirflowException(f"Quarantine enrichment failed: {e}")
@@ -46,7 +47,6 @@ def write_quarantine_dataset(
         logger.info(f"No invalid records found for dataset {dataset}. Skipping write.")
         return 0
 
-    # 2. Подготовка файловой системы
     try:
         s3_fs = get_s3_filesystem()
         pa_fs = PyFileSystem(FSSpecHandler(s3_fs))
@@ -54,17 +54,18 @@ def write_quarantine_dataset(
         logger.error(f"Failed to initialize S3 filesystem for quarantine: {e}")
         raise AirflowException("Could not connect to S3 for quarantine write.")
 
-    # 3. Запись
     target_dir = f"{base_path.replace('s3://', '')}/{dataset}"
     logger.info(f"Writing {q_rows} records to quarantine at {target_dir}")
 
     try:
         ds.write_dataset(
-            data=invalid_df.to_arrow(),
+            data=arrow_table,
             base_dir=target_dir,
             filesystem=pa_fs,
             format="parquet",
-            partitioning=ds.partitioning(field_names=["partition_date"]),
+            partitioning=ds.partitioning(
+                schema=pa.schema([("partition_date", pa.date32())])
+            ),
             existing_data_behavior="overwrite_or_ignore",
             max_partitions=1024,
         )

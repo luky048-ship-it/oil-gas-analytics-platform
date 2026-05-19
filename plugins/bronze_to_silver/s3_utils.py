@@ -32,10 +32,8 @@ def load_bronze_dataset(
 
     final_paths = []
     for p in dataset_paths:
-        if p.endswith(".parquet") or "*" in p:
-            final_paths.append(p)
-        else:
-            final_paths.append(f"{p.rstrip('/')}/*.parquet")
+        clean_p = p.rstrip("/").replace("/*.parquet", "")
+        final_paths.append(f"{clean_p}/*.parquet")
 
     logger.info(
         f"Attempting to scan {len(dataset_paths)} path(s). "
@@ -44,7 +42,7 @@ def load_bronze_dataset(
 
     try:
         lf = pl.scan_parquet(
-            dataset_paths,
+            final_paths,
             storage_options=storage_options,
             hive_partitioning=True,
         )

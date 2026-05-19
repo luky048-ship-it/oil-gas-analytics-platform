@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 def discover_incremental_partitions(
     dataset: str,
     watermark: Optional[datetime],
-    storage_options: dict = None,  # Оставлено для совместимости, но не используется
+    storage_options: dict = None,
     bronze_base: str = "s3://datalake/raw",
 ) -> List[str]:
     """
@@ -24,7 +24,6 @@ def discover_incremental_partitions(
     - Детально логгирует процесс обнаружения.
     """
 
-    # 1. Инициализация клиента
     try:
         fs_client = get_s3_filesystem()
     except Exception as e:
@@ -33,14 +32,11 @@ def discover_incremental_partitions(
         )
         return []
 
-    # 2. Формирование пути
-    # Убираем s3:// для s3fs glob
     bucket_relative_path = bronze_base.replace("s3://", "")
     dataset_path = os.path.join(bucket_relative_path, dataset)
 
     logger.info(f"Scanning S3 path: {dataset_path} for dataset: {dataset}")
 
-    # 3. Получение списка файлов
     try:
         raw_files = fs_client.glob(f"{dataset_path}/**/*.parquet")
     except (PermissionError, FileNotFoundError) as e:
@@ -56,22 +52,17 @@ def discover_incremental_partitions(
 
     logger.debug(f"Found {len(raw_files)} files in dataset {dataset}")
 
-    # 4. Логика фильтрации
     watermark_date = watermark.date() if watermark else None
     valid_partition_paths = set()
 
     for file_path in raw_files:
-        # Получаем директорию файла
         dir_path = os.path.dirname(file_path)
 
-        # Если нет партиций (файл лежит сразу в dataset_path), считаем его валидным
         if "partition_date=" not in dir_path:
-            valid_partition_paths.add(f"s3://{dataset_path}/*.parquet")
+            valid_partition_paths.add(f"s3://{dataset_path}")
             continue
 
-        # Безопасный парсинг даты
         try:
-            # Ищем подстроку партиции
             part_part = [
                 p for p in dir_path.split("/") if p.startswith("partition_date=")
             ]
@@ -81,7 +72,6 @@ def discover_incremental_partitions(
             part_str = part_part[0].replace("partition_date=", "")
             part_date = datetime.strptime(part_str, "%Y-%m-%d").date()
 
-            # Фильтрация по watermark
             if not watermark_date or part_date >= watermark_date:
                 valid_partition_paths.add(f"s3://{dir_path}")
 

@@ -1,5 +1,5 @@
 # plugins/bronze_to_silver/event_time_aggregator.py
-from typing import Dict, Any
+from typing import Any, Dict
 
 import polars as pl
 
@@ -19,13 +19,13 @@ def aggregate_event_time_metrics(
     granularity = aggregation_rules.get("granularity", "1d")
     metrics = aggregation_rules["metrics"]
 
-    # Define the grouping timestamp (e.g., truncating to day)
+    dtype = lf.schema[time_col]
+
     if granularity == "1d":
-        group_time_expr = pl.col(time_col).dt.date().alias("event_date")
-    else:
-        group_time_expr = (
-            pl.col(time_col).dt.truncate(granularity).alias(f"event_{granularity}")
-        )
+        if dtype == pl.Date:
+            group_time_expr = pl.col(time_col).alias("event_date")
+        else:
+            group_time_expr = pl.col(time_col).dt.date().alias("event_date")
 
     agg_exprs = []
     for col, agg_funcs in metrics.items():

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 from airflow.decorators import dag, task
 from airflow.operators.empty import EmptyOperator
+from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.utils.task_group import TaskGroup
 from core.s3_connection import get_s3_filesystem
 from dq_utils.config import TABLE_CONTRACTS
@@ -49,35 +50,45 @@ def dq_pipeline():
                     WHERE dataset = %s AND partition_date = %s AND status = 'SUCCESS'
                 """
                 result = hook.get_first(sql, (ds_name, ds_date))
-
                 if result:
                     return [f"s3://datalake/silver/{ds_name}/partition_date={ds_date}"]
-
                 return []
 
             @task
             def process_partition(ds_name, path, ds_date):
                 logger.info(f"Processing partition: {path}")
 
-                if not path.endswith(".parquet") and "*" not in path:
-                    path_with_mask = f"{path.rstrip('/')}/*.parquet"
-                else:
-                    path_with_mask = path
+                path_with_mask = (
+                    f"{path.rstrip('/')}/*.parquet" if "*" not in path else path
+                )
 
                 contract_obj = TABLE_CONTRACTS[ds_name]
-                parent_joins = [
-                    {
-                        "child_key": fk.column,
-                        "parent_key": fk.parent_column,
-                        "parent_path": f"s3://datalake/silver/{fk.parent_table}/partition_date=*",
-                    }
-                    for fk in contract_obj.foreign_keys
-                ]
+
+                parent_joins = []
+                for fk in contract_obj.foreign_keys:
+                    is_parent_fact = getattr(
+                        TABLE_CONTRACTS.get(fk.parent_table), "is_fact", False
+                    )
+
+                    if is_parent_fact:
+                        p_path = f"s3://datalake/silver/{fk.parent_table}/partition_date={ds_date}/*.parquet"
+                    else:
+                        p_path = f"s3://datalake/silver/{fk.parent_table}/**/*.parquet"
+
+                    parent_joins.append(
+                        {
+                            "child_key": fk.column,
+                            "parent_key": fk.parent_column,
+                            "parent_path": p_path,
+                        }
+                    )
 
                 fs = get_s3_filesystem()
+
                 file_dq = validate_file_integrity(
                     ds_name, path_with_mask, s3_options={"fs": fs}
                 )
+
                 fresh_dq = validate_data_freshness(
                     ds_name,
                     ds_date,
@@ -106,7 +117,7 @@ def dq_pipeline():
 
                 persist_dq_results(results, ds_date)
 
-                if inv_df.height > 0:
+                if inv_df is not None and len(inv_df) > 0:
                     write_quarantine_dataset(
                         inv_df, ds_name, "core_dq", ds_date, s3_options={"fs": fs}
                     )
@@ -118,28 +129,19 @@ def dq_pipeline():
                 publish_pipeline_status(ds_name, ds_date, "SUCCESS")
 
             paths = discover(dataset_name, "{{ ds }}")
-
             processed = process_partition.partial(
                 ds_name=dataset_name, ds_date="{{ ds }}"
             ).expand(path=paths)
-
             processed >> final_status(dataset_name, "{{ ds }}")
 
         task_groups[dataset_name] = tg
 
     for dataset_name, contract in TABLE_CONTRACTS.items():
         start >> task_groups[dataset_name] >> finish
-
         for fk in contract.foreign_keys:
             parent_name = fk.parent_table
             if parent_name in task_groups:
-                logger.info(f"Adding dependency: {parent_name} -> {dataset_name}")
                 task_groups[parent_name] >> task_groups[dataset_name]
-            else:
-                logger.warning(
-                    f"Parent table '{parent_name}' for '{dataset_name}' not found in DAG. "
-                    "Skipping dependency."
-                )
 
 
 dq_pipeline()

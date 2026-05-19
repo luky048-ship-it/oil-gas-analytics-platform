@@ -51,10 +51,8 @@ def update_pipeline_watermark(
             last_processed_watermark = GREATEST(etl_metadata.pipeline_watermarks.last_processed_watermark, EXCLUDED.last_processed_watermark),
             updated_at = NOW();
     """
-    with get_postgres_connection(conn_id) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(query, (dataset, watermark))
-        conn.commit()
+    hook = PostgresHook(postgres_conn_id=conn_id)
+    hook.run(query, parameters=(dataset, watermark))
 
 
 def publish_pipeline_metadata(

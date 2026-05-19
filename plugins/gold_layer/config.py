@@ -24,8 +24,8 @@ MART_CONTRACTS = {
         unique_key=["well_id", "date"],
         business_rules={"min_oil_ton": 0},
         source_datasets={
-            "production": ["well_id", "date"],
-            "well_telemetry": ["well_id", "timestamp"],
+            "production": ["prod_id"],
+            "well_telemetry": ["record_id"],
             "well_targets": ["well_id", "date"],
         },
     ),
@@ -35,7 +35,7 @@ MART_CONTRACTS = {
         unique_key=["well_id", "date"],
         business_rules={},
         source_datasets={
-            "production": ["well_id", "date"],
+            "production": ["prod_id"],
         },
     ),
     "mart_failures": MartConfig(
@@ -44,8 +44,8 @@ MART_CONTRACTS = {
         unique_key=["pump_id", "timestamp"],
         business_rules={"max_z_score": 10.0},
         source_datasets={
-            "pump_sensors": ["pump_id", "timestamp"],
-            "pump_failures": ["pump_id", "timestamp"],
+            "pump_sensors": ["record_id"],
+            "pump_failures": ["failure_id"],
             "pumps": ["pump_id"],
         },
     ),
