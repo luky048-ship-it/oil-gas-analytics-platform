@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import polars as pl
 from airflow import DAG
@@ -120,26 +120,30 @@ with DAG(
         if outlier_invalid_lf is not None:
             all_invalid_lfs.append(outlier_invalid_lf)
 
+        # Обработка случая пустого списка для concat и выравнивание схем по порядку колонок
         q_rows = 0
         normalized_lfs = []
+        expected_meta_cols = ["_quarantine_validation_name", "_quarantine_reason_code"]
+        
         for invalid_lf_item in all_invalid_lfs:
             schema = invalid_lf_item.collect_schema()
             lf_with_meta = invalid_lf_item
 
-            if "_quarantine_validation_name" not in schema:
-                lf_with_meta = lf_with_meta.with_columns(
-                    pl.lit("UNKNOWN_VALIDATION").alias("_quarantine_validation_name")
-                )
-            if "_quarantine_reason_code" not in schema:
-                lf_with_meta = lf_with_meta.with_columns(
-                    pl.lit("UNKNOWN_REASON").alias("_quarantine_reason_code")
-                )
+            # Добавляем недостающие мета-колонки с дефолтными значениями
+            for col_name in expected_meta_cols:
+                if col_name not in schema:
+                    lf_with_meta = lf_with_meta.with_columns(
+                        pl.lit("UNKNOWN").alias(col_name)
+                    )
 
-            normalized_lfs.append(lf_with_meta)
+            # Выравниваем порядок колонок: сначала данные, потом мета-колонки в фиксированном порядке
+            base_columns = [col for col in schema if col not in expected_meta_cols]
+            ordered_columns = base_columns + expected_meta_cols
+            
+            normalized_lfs.append(lf_with_meta.select(ordered_columns))
 
-        # Обработка случая пустого списка для concat
         if normalized_lfs:
-            final_invalid_lf = pl.concat(normalized_lfs)
+            final_invalid_lf = pl.concat(normalized_lfs, how="vertical")
             q_rows = write_quarantine_dataset(
                 invalid_lf=final_invalid_lf,
                 dataset=dataset,
@@ -187,7 +191,7 @@ with DAG(
             new_watermark = None
 
         if not new_watermark:
-            new_watermark = watermark or datetime.strptime(execution_date, "%Y-%m-%d")
+            new_watermark = watermark or datetime.strptime(execution_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
         t_end = datetime.now()
         execution_time = (t_end - t_start).total_seconds()

@@ -10,6 +10,8 @@ def aggregate_event_time_metrics(
     """
     Performs event-time rollups (e.g., daily aggregation for telemetry).
     Groups by the specified entity key and truncated time column.
+    Важно: агрегированная колонка времени сохраняет имя исходной колонки (time_col),
+    чтобы последующие шаги пайплайна могли корректно обращаться к ней.
     """
     if not aggregation_rules:
         return lf
@@ -23,9 +25,9 @@ def aggregate_event_time_metrics(
 
     if granularity == "1d":
         if dtype == pl.Date:
-            group_time_expr = pl.col(time_col).alias("event_date")
+            group_time_expr = pl.col(time_col).alias(time_col)
         else:
-            group_time_expr = pl.col(time_col).dt.date().alias("event_date")
+            group_time_expr = pl.col(time_col).dt.date().alias(time_col)
 
     agg_exprs = []
     for col, agg_funcs in metrics.items():
