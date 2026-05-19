@@ -768,7 +768,7 @@ Gold-layer production mart aggregated by well and operational day.
 | avg_pump_speed_rpm | numeric(10,2) | YES | average pump RPM |
 | avg_oil_flow_rate | numeric(10,3) | YES | average flow rate |
 | max_vibration | numeric(6,2) | YES | max observed vibration |
-| daily_target_ton | numeric(12,3) | YES | planned target |
+| daily_target_ton | numeric(12,3) | YES | planned target (well_targets.daily_oil_ton)|
 | production_efficiency | numeric(8,4) | YES | actual vs target ratio |
 | downtime_pct | numeric(6,3) | YES | operational downtime percentage |
 | load_timestamp | timestamp | YES | ETL load timestamp |
