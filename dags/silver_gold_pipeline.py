@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from airflow.decorators import dag, task, task_group
 from airflow.exceptions import AirflowSkipException
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from config import MART_CONTRACTS
+from core.config import TABLE_CONTRACTS as CORE_TABLE_CONTRACTS
 from gold_layer.builders.mart_failures import build_mart_failures
 from gold_layer.builders.mart_logistics import build_mart_logistics
 from gold_layer.builders.mart_production import build_mart_production
@@ -18,6 +18,9 @@ from gold_layer.validators import (validate_business_readiness,
                                    validate_mart_before_publish)
 from gold_layer.watermarks import get_last_watermark, update_mart_watermark
 
+# Импортируем локальный MartConfig для создания адаптированных контрактов
+from gold_layer.config import MartConfig
+
 default_args = {
     "owner": "data_engineer",
     "start_date": datetime(2025, 1, 1),
@@ -25,6 +28,79 @@ default_args = {
     "retry_delay": timedelta(minutes=1),
     "pool": "gold_pool",
 }
+
+
+def _convert_core_contract_to_mart_format(core_contracts):
+    """
+    Адаптер: конвертирует контракты из plugins/core/config.py (TableConfig)
+    в формат MartConfig, ожидаемый плагинами gold_layer.
+    
+    Золотой слой работает с mart-таблицами, которые агрегируют данные из silver.
+    Мы создаем конфигурацию mart-таблиц на основе информации о source_datasets
+    из оригинального gold_layer/config.py, но используем core.config как источник
+    правды для схем и валидаций исходных таблиц.
+    """
+    # Определяем mapping mart -> source datasets (из старого gold_layer/config.py)
+    mart_sources = {
+        "mart_production": {
+            "production": ["prod_id"],
+            "well_telemetry": ["record_id"],
+            "well_targets": ["well_id", "date"],
+        },
+        "mart_well_kpi": {
+            "production": ["prod_id"],
+        },
+        "mart_failures": {
+            "pump_sensors": ["record_id"],
+            "pump_failures": ["failure_id"],
+            "pumps": ["pump_id"],
+        },
+        "mart_logistics": {
+            "deliveries": ["delivery_id"],
+            "drivers": ["driver_id"],
+            "vehicles": ["vehicle_id"],
+        },
+    }
+
+    # Бизнес-правила для mart-таблиц (из старого gold_layer/config.py)
+    mart_business_rules = {
+        "mart_production": {"min_oil_ton": 0},
+        "mart_well_kpi": {},
+        "mart_failures": {"max_z_score": 10.0},
+        "mart_logistics": {},
+    }
+
+    # Критические колонки и уникальные ключи для mart-таблиц
+    mart_critical_columns = {
+        "mart_production": ["well_id", "date"],
+        "mart_well_kpi": ["well_id", "date"],
+        "mart_failures": ["pump_id", "date", "timestamp"],
+        "mart_logistics": ["delivery_id", "date"],
+    }
+
+    mart_unique_keys = {
+        "mart_production": ["well_id", "date"],
+        "mart_well_kpi": ["well_id", "date"],
+        "mart_failures": ["pump_id", "timestamp"],
+        "mart_logistics": ["delivery_id"],
+    }
+
+    # Создаем MartConfig для каждой mart-таблицы
+    mart_contracts = {}
+    for mart_name, sources in mart_sources.items():
+        mart_contracts[mart_name] = MartConfig(
+            table_name=f"gold.{mart_name}",
+            critical_columns=mart_critical_columns[mart_name],
+            unique_key=mart_unique_keys[mart_name],
+            business_rules=mart_business_rules[mart_name],
+            source_datasets=sources,
+        )
+
+    return mart_contracts
+
+
+# Создаем адаптированный реестр mart-контрактов для gold_layer
+MART_CONTRACTS = _convert_core_contract_to_mart_format(CORE_TABLE_CONTRACTS)
 
 
 @dag(

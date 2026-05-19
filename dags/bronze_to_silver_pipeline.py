@@ -10,7 +10,7 @@ from airflow.decorators import task
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.task_group import TaskGroup
 from bronze_to_silver.business_validator import validate_critical_rules
-from bronze_to_silver.config import SCHEMA_CONTRACTS
+from core.config import TABLE_CONTRACTS, ValidationRule, Severity
 from bronze_to_silver.deduplicator import deduplicate_dataset
 from bronze_to_silver.enricher import enrich_reference_data
 from bronze_to_silver.event_time_aggregator import aggregate_event_time_metrics
@@ -41,6 +41,126 @@ DEFAULT_ARGS = {
     "sla": timedelta(hours=2),
     "pool": "silver_processing",
 }
+
+
+def _convert_contract_for_bronze_to_silver(table_config):
+    """
+    Конвертирует TableConfig из единого config.py в формат, 
+    совместимый с утилитами bronze_to_silver.
+    """
+    # Строим columns schema
+    columns = dict(table_config.schema)
+    
+    # Определяем primary_key
+    primary_key = table_config.primary_key or []
+    
+    # Определяем foreign_keys как dict {column: parent_table.parent_column}
+    foreign_keys = {}
+    fk_columns = set()  # Для исключения из агрегации
+    for fk in table_config.foreign_keys:
+        foreign_keys[fk.column] = f"{fk.parent_table}.{fk.parent_column}"
+        fk_columns.add(fk.column)
+    
+    # Определяем time_column (partition_column или streaming ordering_key)
+    time_column = None
+    if table_config.partition_column:
+        time_column = table_config.partition_column
+    elif table_config.streaming and table_config.streaming.ordering_key:
+        time_column = table_config.streaming.ordering_key
+    
+    # dedup_key: primary_key + time_column если есть
+    dedup_key = list(primary_key) if primary_key else []
+    if time_column and time_column not in dedup_key:
+        dedup_key.append(time_column)
+    
+    # validation_rules: конвертируем ValidationRule в формат business_validator
+    validation_rules = {"enums": {}, "ranges": {}, "custom": []}
+    for rule in table_config.validation_rules:
+        if rule.rule_type == "enum":
+            col = rule.params.get("column")
+            values = rule.params.get("values", [])
+            if col:
+                validation_rules["enums"][col] = values
+        elif rule.rule_type == "range":
+            col = rule.params.get("column")
+            if col:
+                range_params = {}
+                if "min" in rule.params:
+                    range_params["min"] = rule.params["min"]
+                if "max" in rule.params:
+                    range_params["max"] = rule.params["max"]
+                validation_rules["ranges"][col] = range_params
+        elif rule.rule_type == "custom":
+            expr = rule.params.get("expression")
+            if expr:
+                severity = rule.severity.value if isinstance(rule.severity, Severity) else str(rule.severity)
+                validation_rules["custom"].append({"rule": expr, "severity": severity})
+        elif rule.rule_type == "not_null":
+            # not_null правила обрабатываются на уровне схемы
+            pass
+    
+    # outlier_columns: пока пустой список, можно расширить позже
+    outlier_columns = []
+    
+    # missing_rules: базовая заглушка, можно расширить
+    missing_rules = {}
+    
+    # aggregation: если есть streaming spec, можно определить агрегацию
+    aggregation = None
+    if table_config.streaming:
+        # Для телеметрии можно определить дневную агрегацию
+        if "telemetry" in table_config.table_name or "sensors" in table_config.table_name:
+            key_col = None
+            # Определяем ключ агрегации из foreign keys или clustering columns
+            for fk in table_config.foreign_keys:
+                if "well" in fk.parent_table:
+                    key_col = "well_id"
+                    break
+                elif "pump" in fk.parent_table:
+                    key_col = "pump_id"
+                    break
+            
+            if key_col and time_column:
+                # Определяем числовые колонки для агрегации
+                # Исключаем: primary_key, foreign_keys, time_column
+                exclude_cols = set(primary_key) | fk_columns
+                if time_column:
+                    exclude_cols.add(time_column)
+                
+                numeric_cols = [
+                    col for col, dtype in table_config.schema.items() 
+                    if dtype.is_numeric() and col not in exclude_cols
+                ]
+                metrics = {}
+                for col in numeric_cols:
+                    metrics[col] = ["mean", "max"]
+                
+                aggregation = {
+                    "key": key_col,
+                    "time_column": time_column,
+                    "granularity": "1d",
+                    "metrics": metrics,
+                }
+    
+    return {
+        "columns": columns,
+        "primary_key": primary_key,
+        "foreign_keys": foreign_keys,
+        "time_column": time_column,
+        "dedup_key": dedup_key,
+        "validation_rules": validation_rules,
+        "outlier_columns": outlier_columns,
+        "missing_rules": missing_rules,
+        "aggregation": aggregation,
+    }
+
+
+# Преобразуем TABLE_CONTRACTS в SCHEMA_CONTRACTS формат для бронзовых таблиц
+# Фильтруем только bronze слой
+SCHEMA_CONTRACTS = {}
+for table_name, table_config in TABLE_CONTRACTS.items():
+    if table_config.layer == "bronze":
+        SCHEMA_CONTRACTS[table_name] = _convert_contract_for_bronze_to_silver(table_config)
 
 with DAG(
     dag_id="bronze_to_silver_pipeline",
