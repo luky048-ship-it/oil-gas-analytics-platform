@@ -119,16 +119,30 @@ with DAG(
             all_invalid_lfs.append(outlier_invalid_lf)
 
         q_rows = 0
-        if all_invalid_lfs:
-            final_invalid_lf = pl.concat(all_invalid_lfs)
-            q_rows = write_quarantine_dataset(
-                invalid_lf=final_invalid_lf,
-                dataset=dataset,
-                reason_code="DQ_VIOLATION",
-                execution_date=execution_date,
-                storage_options=storage_options,
-            )
-        # ----------------------------------------------------
+        normalized_lfs = []
+        for invalid_lf_item in all_invalid_lfs:
+            schema = invalid_lf_item.collect_schema()
+            lf_with_meta = invalid_lf_item
+
+            if "_quarantine_validation_name" not in schema:
+                lf_with_meta = lf_with_meta.with_columns(
+                    pl.lit("UNKNOWN_VALIDATION").alias("_quarantine_validation_name")
+                )
+            if "_quarantine_reason_code" not in schema:
+                lf_with_meta = lf_with_meta.with_columns(
+                    pl.lit("UNKNOWN_REASON").alias("_quarantine_reason_code")
+                )
+
+            normalized_lfs.append(lf_with_meta)
+
+        final_invalid_lf = pl.concat(normalized_lfs)
+        q_rows = write_quarantine_dataset(
+            invalid_lf=final_invalid_lf,
+            dataset=dataset,
+            reason_code="DQ_VIOLATION",
+            execution_date=execution_date,
+            storage_options=storage_options,
+        )
 
         if "aggregation" in contract:
             valid_lf = aggregate_event_time_metrics(

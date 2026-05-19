@@ -1,5 +1,6 @@
+from typing import Any, Dict, Tuple
+
 import polars as pl
-from typing import Dict, Any, Tuple
 
 
 def validate_critical_rules(
@@ -30,7 +31,10 @@ def validate_critical_rules(
 
     valid_lf = lf.filter(~is_invalid)
     invalid_lf = lf.filter(is_invalid).with_columns(
-        [pl.lit("PHYSICAL_LIMIT_VIOLATION").alias("_quarantine_reason_code")]
+        [
+            pl.lit("PHYSICAL_LIMIT_VIOLATION").alias("_quarantine_reason_code"),
+            pl.lit("BUSINESS_VALIDATION").alias("_quarantine_validation_name"),
+        ]
     )
 
     return valid_lf, invalid_lf

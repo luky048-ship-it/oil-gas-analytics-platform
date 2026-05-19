@@ -64,7 +64,7 @@ def publish_pipeline_metadata(
     query = """
         INSERT INTO etl_metadata.pipeline_executions (
             dataset, partition_date, processed_rows, quarantined_rows,
-            execution_time_sec, watermark, status, updated_at
+            execution_time_sec, watermark, status
         ) VALUES %s
         ON CONFLICT (dataset, partition_date) DO UPDATE SET
             processed_rows = EXCLUDED.processed_rows,
