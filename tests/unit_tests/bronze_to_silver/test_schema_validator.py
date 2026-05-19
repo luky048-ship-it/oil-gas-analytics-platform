@@ -15,9 +15,9 @@ class TestSchemaValidator:
     def test_validate_schema_valid(self):
         """Test that valid schema passes without error."""
         expected_schema = {
-            "id": pl.Int64(),  # Changed to Int64 to match Polars default
+            "id": pl.Int32(),  # Per contract: Identifier = int32
             "name": pl.String(),
-            "value": pl.Float64()
+            "value": pl.Float64()  # Per contract: Numeric KPI = float64
         }
         
         lf = pl.LazyFrame({
@@ -67,7 +67,7 @@ class TestSchemaValidator:
     def test_validate_schema_extra_columns_allowed(self):
         """Test that extra columns in data are allowed (schema drift)."""
         expected_schema = {
-            "id": pl.Int64()  # Changed to Int64 to match Polars default
+            "id": pl.Int32()  # Per contract: Identifier = int32
         }
         
         lf = pl.LazyFrame({
@@ -80,18 +80,18 @@ class TestSchemaValidator:
         validate_dataset_schema(lf, "test_dataset", expected_schema)
 
     def test_validate_schema_datetime_type(self):
-        """Test datetime type validation with timezone."""
+        """Test datetime type validation with timezone - per contract timestamp("us") precision."""
         from datetime import datetime, timezone
         
         expected_schema = {
-            "timestamp": pl.Datetime()
+            "timestamp": pl.Datetime(time_unit="us")  # Per contract: timestamp(us) precision mandatory
         }
         
         lf = pl.LazyFrame({
             "timestamp": [datetime(2024, 1, 1, tzinfo=timezone.utc)]
         })
         
-        # Should pass - Datetime matches Datetime base type
+        # Should pass - Datetime matches Datetime base type with microseconds
         validate_dataset_schema(lf, "test_dataset", expected_schema)
 
     def test_validate_schema_empty_dataframe(self):
