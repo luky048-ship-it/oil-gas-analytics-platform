@@ -1,37 +1,6 @@
 ```
-# Compiled and build artifacts
-*.pyc
+# Python
 __pycache__/
-*.o
-*.obj
-*.so
-*.a
-*.dll
-*.exe
-*.out
-
-# Dependencies
-.venv/
-venv/
-.env
-.env.local
-.env.*
-
-# Logs and temp files
-*.log
-*.tmp
-*.swp
-
-# Editors
-.vscode/
-.idea/
-
-# Coverage
-.coverage
-coverage/
-htmlcov/
-
-# Python specific
 *.py[cod]
 *$py.class
 *.so
@@ -52,11 +21,31 @@ wheels/
 .installed.cfg
 *.egg
 
-# Airflow specific
-airflow-webserver.pid
-airflow-worker.pid
-airflow_scheduler.pid
-airflow_executor.pid
-webserver_config.py
-unit-test-cover/
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.coverage.*
+
+# Environment
+.env
+.env.local
+.env.*
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
 ```

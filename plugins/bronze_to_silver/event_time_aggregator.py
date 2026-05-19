@@ -21,7 +21,9 @@ def aggregate_event_time_metrics(
     granularity = aggregation_rules.get("granularity", "1d")
     metrics = aggregation_rules["metrics"]
 
-    dtype = lf.schema[time_col]
+    # Use collect_schema() to avoid PerformanceWarning
+    schema = lf.collect_schema()
+    dtype = schema[time_col]
 
     if granularity == "1d":
         if dtype == pl.Date:
