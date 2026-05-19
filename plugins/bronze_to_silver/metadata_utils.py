@@ -4,8 +4,9 @@ from datetime import datetime
 from typing import Optional
 
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from bronze_to_silver.pipeline_execution import PipelineExecutionResult
 from psycopg2.extras import execute_values
+
+from bronze_to_silver.pipeline_execution import PipelineExecutionResult
 
 logger = logging.getLogger(__name__)
 
