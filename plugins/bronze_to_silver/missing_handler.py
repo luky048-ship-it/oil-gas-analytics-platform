@@ -29,6 +29,10 @@ def handle_missing_values(
             # Строго оборачиваем значение в литерал с нужным типом
             # Это предотвращает неявный upcast Decimal -> Float64
             if target_dtype:
+                # Для Decimal типа конвертируем fill_val в строку, т.к. Polars запрещает
+                # прямую конвертацию float -> Decimal из-за возможных погрешностей
+                if target_dtype.base_type() == pl.Decimal:
+                    fill_val = str(fill_val)
                 expr = pl.col(col).fill_null(pl.lit(fill_val, dtype=target_dtype))
             else:
                 expr = pl.col(col).fill_null(fill_val)
@@ -38,9 +42,10 @@ def handle_missing_values(
         elif strategy == "forward_fill":
             partition_col = rule["partition_by"]
             order_col = rule["order_by"]
-            # Сортировка указывается напрямую внутри оконного вызова
-            # Это гарантирует корректный порядок при параллельном выполнении
-            expr = pl.col(col).sort_by(order_col).forward_fill().over(partition_col)
+            # Сортируем сам LazyFrame перед оконными вычислениями, чтобы sort_by внутри over() 
+            # не перемешивал строки по оригинальному позиционному индексу
+            lf = lf.sort(order_col)
+            expr = pl.col(col).forward_fill().over(partition_col)
             expressions.append(expr.alias(col))
 
     if expressions:

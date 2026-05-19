@@ -33,7 +33,7 @@ def detect_outliers(
             condition = (col_float < lower_bound) | (col_float > upper_bound)
             outlier_conditions.append(condition)
 
-    is_outlier_expr = pl.any_horizontal(*outlier_conditions)
+    is_outlier_expr = pl.any_horizontal(*outlier_conditions).fill_null(False)
 
     valid_lf = lf.filter(~is_outlier_expr)
     invalid_lf = lf.filter(is_outlier_expr)

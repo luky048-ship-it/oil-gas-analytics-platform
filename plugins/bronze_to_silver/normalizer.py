@@ -11,8 +11,13 @@ def normalize_dataset(
 
     expected_schema = schema_contract["columns"]
     expressions = []
+    actual_schema = lf.collect_schema()
 
     for col_name, dtype in expected_schema.items():
+        # Only process columns that exist in the source data
+        if col_name not in actual_schema:
+            continue
+            
         expr = pl.col(col_name)
 
         expr = expr.cast(dtype)

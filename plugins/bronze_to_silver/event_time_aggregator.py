@@ -41,6 +41,10 @@ def aggregate_event_time_metrics(
             elif func == "sum":
                 agg_exprs.append(pl.col(col).sum().alias(f"sum_{col}"))
 
+    # Preserve technical audit column through aggregation
+    if "_silver_processed_at" in lf.collect_schema():
+        agg_exprs.append(pl.col("_silver_processed_at").max().alias("_silver_processed_at"))
+        
     lf_agg = lf.group_by([key_col, group_time_expr]).agg(agg_exprs)
 
     return lf_agg
