@@ -7,8 +7,8 @@ from airflow.decorators import dag, task
 from airflow.operators.empty import EmptyOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.utils.task_group import TaskGroup
+from core.config import TABLE_CONTRACTS as CORE_TABLE_CONTRACTS
 from core.s3_connection import get_s3_filesystem
-from dq_utils.config import TABLE_CONTRACTS
 from dq_utils.core import execute_dq_pipeline
 from dq_utils.dq_reporter import persist_dq_results
 from dq_utils.freshness_validator import validate_data_freshness
@@ -18,6 +18,71 @@ from dq_utils.s3_utils import (discover_available_partitions,
                                validate_file_integrity)
 
 logger = logging.getLogger(__name__)
+
+
+def _convert_core_contract_to_dq_format(core_contract):
+    """
+    Адаптер: конвертирует контракт из plugins/core/config.py (TableConfig)
+    в формат, ожидаемый плагинами dq_utils (TableContract).
+    """
+    from dq_utils.config import ForeignKeyContract, TableContract
+
+    # Конвертация foreign keys
+    foreign_keys = [
+        ForeignKeyContract(
+            column=fk.column,
+            parent_table=fk.parent_table,
+            parent_column=fk.parent_column,
+        )
+        for fk in core_contract.foreign_keys
+    ]
+
+    # Конвертация value_ranges из validation_rules
+    value_ranges = {}
+    enums = {}
+    custom_rules = []
+
+    for rule in core_contract.validation_rules:
+        if rule.rule_type == "range":
+            col = rule.params.get("column")
+            min_val = rule.params.get("min")
+            max_val = rule.params.get("max")
+            value_ranges[col] = (min_val, max_val)
+        elif rule.rule_type == "enum":
+            col = rule.params.get("column")
+            values = rule.params.get("values", [])
+            enums[col] = values
+        elif rule.rule_type == "custom":
+            expr = rule.params.get("expression", "")
+            # Преобразуем выражение из формата core в формат dq_utils
+            # Например: "start_date <= CURRENT_DATE" -> "start_date <= current_date"
+            custom_rules.append(expr.replace("CURRENT_DATE", "current_date"))
+
+    # Конвертация freshness_sla_hours в freshness_sla_minutes
+    freshness_sla_minutes = None
+    if core_contract.freshness_sla_hours is not None:
+        freshness_sla_minutes = int(core_contract.freshness_sla_hours * 60)
+
+    return TableContract(
+        schema=core_contract.schema,
+        primary_keys=core_contract.primary_key,
+        not_null_columns=core_contract.not_null_columns,
+        foreign_keys=foreign_keys,
+        unique_columns=core_contract.unique_columns,
+        value_ranges=value_ranges,
+        enums=enums,
+        custom_rules=custom_rules,
+        freshness_sla_minutes=freshness_sla_minutes,
+        partition_column=core_contract.partition_column,
+        statistical_monitored_columns=[],  # Можно расширить при необходимости
+    )
+
+
+# Создаем адаптированный реестр контрактов для dq_utils
+TABLE_CONTRACTS = {
+    name: _convert_core_contract_to_dq_format(contract)
+    for name, contract in CORE_TABLE_CONTRACTS.items()
+}
 
 
 @dag(
