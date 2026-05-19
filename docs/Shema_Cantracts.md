@@ -76,7 +76,7 @@ Examples:
 | Identifier          | int32         |
 | Numeric KPI         | float64       |
 | Date                | date32        |
-| Event Timestamp     | timestamp(s)  |
+| Event Timestamp     | timestamp(us)  |
 | Dimension Attribute | string        |
 
 ---
@@ -96,7 +96,7 @@ Examples:
 ## 2.5 Time Standards
 
 * All timestamps stored in UTC.
-* timestamp("s") precision is mandatory.
+* timestamp("us") precision is mandatory.
 * Dates represent operational local day.
 * Telemetry timestamps must be monotonic within source partition.
 
@@ -244,13 +244,13 @@ Daily production metrics per well.
 | prod_id        | int32   | NO       | production record id           |
 | well_id        | int32   | NO       | well reference                 |
 | date           | date32  | NO       | production day                 |
-| oil_ton        | NUMERIC(10,2) | YES      | oil production in tons         |
-| gas_m3         | NUMERIC(12,2) | YES      | gas production in cubic meters |
-| water_m3       | NUMERIC(12,2) | YES      | water production               |
-| energy_kwh     | NUMERIC(12,2) | YES      | consumed energy                |
-| downtime_hours | NUMERIC(5,2) | YES      | downtime duration              |
-| temperature    | NUMERIC(5,2) | YES      | average operating temperature  |
-| pressure       | NUMERIC(5,2) | YES      | average pressure               |
+| oil_ton        | float64 | YES      | oil production in tons         |
+| gas_m3         | float64 | YES      | gas production in cubic meters |
+| water_m3       | float64 | YES      | water production               |
+| energy_kwh     | float64 | YES      | consumed energy                |
+| downtime_hours | float64 | YES      | downtime duration              |
+| temperature    | float64 | YES      | average operating temperature  |
+| pressure       | float64 | YES      | average pressure               |
 
 ## Constraints
 
@@ -301,14 +301,14 @@ High-frequency telemetry from wells.
 | -------------- | ------------ | -------- | --------------------- |
 | record_id      | int32        | NO       | telemetry record id   |
 | well_id        | int32        | NO       | well reference        |
-| timestamp      | timestamp(s) | YES       | event timestamp UTC   |
-| pump_speed_rpm | NUMERIC(8,2)      | YES      | pump rotation speed   |
-| pump_current   | NUMERIC(8,2)      | YES      | electrical current    |
-| pressure_in    | NUMERIC(8,2)      | YES      | inlet pressure        |
-| pressure_out   |  NUMERIC(8,2)       | YES      | outlet pressure       |
-| temperature    | NUMERIC(5,2)      | YES      | operating temperature |
-| vibration      | NUMERIC(5,2)      | YES      | vibration metric      |
-| oil_flow_rate  | NUMERIC(8,2)      | YES      | real-time flow rate   |
+| timestamp      | timestamp(us) | YES       | event timestamp UTC   |
+| pump_speed_rpm | float64      | YES      | pump rotation speed   |
+| pump_current   | float64      | YES      | electrical current    |
+| pressure_in    | float64      | YES      | inlet pressure        |
+| pressure_out   |  float64       | YES      | outlet pressure       |
+| temperature    | float64      | YES      | operating temperature |
+| vibration      | float64      | YES      | vibration metric      |
+| oil_flow_rate  | float64      | YES      | real-time flow rate   |
 
 ## Constraints
 
@@ -349,10 +349,6 @@ Cluster by:
 
 Daily oil production targets.
 
-## Composite Key
-
-* None
-
 ## Foreign Keys
 
 * well_id → wells.well_id
@@ -363,7 +359,7 @@ Daily oil production targets.
 | ------------- | ------- | -------- | ------------------ |
 | well_id       | int32   | YES       | well reference     |
 | date          | date32  | YES       | target date        |
-| daily_oil_ton | NUMERIC(10,2) | NO       | planned production |
+| daily_oil_ton | float64| NO       | planned production |
 
 ## Constraints
 
@@ -428,12 +424,12 @@ Telemetry from pump sensor systems.
 | ----------- | ------------ | -------- | ------------------ |
 | record_id   | int32        | NO       | sensor record id   |
 | pump_id     | int32        | YES       | pump reference     |
-| timestamp   | timestamp(s) | YES       | event timestamp    |
-| temperature |   NUMERIC(5,2)    | YES      | temperature metric |
-| vibration   |  NUMERIC(5,2)     | YES      | vibration level    |
-| current     |  NUMERIC(8,2)     | YES      | electrical current |
-| rpm         |   NUMERIC(8,2)    | YES      | rotational speed   |
-| pressure    |   NUMERIC(8,2)    | YES      | pressure metric    |
+| timestamp   | timestamp(us) | YES       | event timestamp    |
+| temperature |  float64    | YES      | temperature metric |
+| vibration   |  float64    | YES      | vibration level    |
+| current     |  float64    | YES      | electrical current |
+| rpm         |   float64   | YES      | rotational speed   |
+| pressure    |   float64    | YES      | pressure metric    |
 
 ## Constraints
 
@@ -474,9 +470,9 @@ Pump failure events and downtime tracking.
 | -------------- | ------------ | -------- | ---------------------- |
 | failure_id     | int32        | NO       | failure event id       |
 | pump_id        | int32        | YES       | affected pump          |
-| failure_date   | timestamp(s) | YES       | failure timestamp      |
+| failure_date   | timestamp(us) | YES       | failure timestamp      |
 | failure_type   | string       | YES       | failure classification |
-| downtime_hours | NUMERIC(5,2)      | YES      | outage duration        |
+| downtime_hours | float64    | YES      | outage duration        |
 
 ## Constraints
 
@@ -522,10 +518,10 @@ Oil logistics and transportation events.
 | source             | string  | YES       | origin location      |
 | destination        | string  | YES       | destination location |
 | product_type       | string  | YES       | transported product  |
-| volume_ton         |  NUMERIC(10,2)| YES      | transported volume   |
-| cost_usd           |  NUMERIC(10,2)| YES      | delivery cost        |
-| delay_hours        |  NUMERIC(6,2)| YES      | transport delay      |
-| distance_km        |  NUMERIC(8,2)| YES      | travel distance      |
+| volume_ton         |  float64| YES      | transported volume   |
+| cost_usd           |  float64| YES      | delivery cost        |
+| delay_hours        |  float64| YES      | transport delay      |
+| distance_km        |  float64| YES      | travel distance      |
 | weather_conditions | string  | YES      | weather snapshot     |
 | driver_id          | int32   | YES       | assigned driver      |
 | vehicle_id         | int32   | YES       | assigned vehicle     |
@@ -945,7 +941,7 @@ Gold-layer logistics and transportation analytics mart.
 | pump_sensors   | pump_id    | pumps        | pump_id       |
 | pump_failures  | pump_id    | pumps        | pump_id       |
 | deliveries     | driver_id  | drivers      | driver_id     |
-| delNUMERIC(8,2)     | vehicle_id | vehicles     | vehicle_id    |
+| deliveries     | vehicle_id | vehicles     | vehicle_id    |
 | gold.mart_production | well_id | wells | well_id |
 | gold.mart_well_kpi | well_id | wells | well_id |
 | gold.mart_failures | pump_id | pumps | pump_id |
