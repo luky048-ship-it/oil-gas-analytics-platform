@@ -87,8 +87,10 @@ with DAG(
             time_column=contract.get("time_column"),
         )
 
-        validate_dataset_schema(lf, dataset, contract["columns"])
+        # Сначала нормализация (приведение типов), затем валидация схемы
+        # Это позволяет легально кастить Decimal -> Float64 и другие совместимые типы
         lf = normalize_dataset(lf, dataset, contract)
+        validate_dataset_schema(lf, dataset, contract["columns"])
 
         valid_lf, business_invalid_lf = validate_critical_rules(
             lf, contract.get("validation_rules", {})
@@ -135,14 +137,18 @@ with DAG(
 
             normalized_lfs.append(lf_with_meta)
 
-        final_invalid_lf = pl.concat(normalized_lfs)
-        q_rows = write_quarantine_dataset(
-            invalid_lf=final_invalid_lf,
-            dataset=dataset,
-            reason_code="DQ_VIOLATION",
-            execution_date=execution_date,
-            storage_options=storage_options,
-        )
+        # Обработка случая пустого списка для concat
+        if normalized_lfs:
+            final_invalid_lf = pl.concat(normalized_lfs)
+            q_rows = write_quarantine_dataset(
+                invalid_lf=final_invalid_lf,
+                dataset=dataset,
+                reason_code="DQ_VIOLATION",
+                execution_date=execution_date,
+                storage_options=storage_options,
+            )
+        else:
+            logger.info(f"No invalid records to quarantine for {dataset}.")
 
         if "aggregation" in contract:
             valid_lf = aggregate_event_time_metrics(
@@ -164,6 +170,7 @@ with DAG(
             dataset=dataset,
             partition_date=execution_date,
             storage_options=storage_options,
+            time_column=contract.get("time_column"),
         )
 
         time_col = contract.get("time_column")

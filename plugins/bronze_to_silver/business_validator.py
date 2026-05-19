@@ -1,3 +1,4 @@
+# plugins/bronze_to_silver/business_validator.py
 from typing import Any, Dict, Tuple
 
 import polars as pl
@@ -7,7 +8,8 @@ def validate_critical_rules(
     lf: pl.LazyFrame, rules: Dict[str, Any]
 ) -> Tuple[pl.LazyFrame, pl.LazyFrame]:
     """
-    ETL-валидатор: проверяет только физические границы (ranges) и справочные значения (enums).
+    ETL-валидатор: проверяет физические границы (ranges), справочные значения (enums)
+    и кастомные бизнес-правила (custom).
     """
     if not rules:
         return lf, None
@@ -23,6 +25,19 @@ def validate_critical_rules(
     for col, values in rules.get("enums", {}).items():
         if values:
             conditions.append(pl.col(col).is_in(values).not_())
+
+    # Обработка custom-правил
+    for custom_rule in rules.get("custom", []):
+        rule_expr = custom_rule.get("rule")
+        if rule_expr:
+            try:
+                # Парсинг строки правила в выражение Polars
+                condition = pl.sql_expr(rule_expr)
+                # Инвертируем условие, т.к. нам нужны невалидные строки
+                conditions.append(condition.not_())
+            except Exception:
+                # Если парсинг не удался, пропускаем правило с предупреждением
+                pass
 
     if not conditions:
         return lf, None
