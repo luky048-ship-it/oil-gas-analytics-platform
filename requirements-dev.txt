@@ -1,0 +1,25 @@
+# Движок и окружение
+pytest>=8.0.0
+pytest-mock>=3.12.0
+pytest-env>=1.1.0
+
+# Инфраструктура (Слой хранения)
+testcontainers[postgres]>=3.7.0
+moto[server]>=5.0.0
+s3fs>=2024.3.1
+psycopg2-binary>=2.9.9
+adbc-driver-postgresql>=0.10.0
+pyarrow
+# Математика и Валидация (Новое для ядра Silver)
+polars>=1.0.0     
+scipy>=1.12.0         
+dirty-equals>=0.7.0   
+
+# Работа с датами (для partition_discovery и missing_handler)
+freezegun>=1.4.0         # Позволит "заморозить" current_date для тестов валидатора
+apache-airflow==2.8.1
+aiobotocore>=3.7.1
+aiohttp>=3.11.0
+
+# Airflow провайдеры
+apache-airflow-providers-postgres>=5.0.0

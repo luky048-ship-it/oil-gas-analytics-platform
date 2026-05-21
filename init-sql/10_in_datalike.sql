@@ -7,8 +7,12 @@ CREATE TABLE IF NOT EXISTS etl_metadata.loaded_partitions (
     loaded_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at     TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     dag_run_id     TEXT,
+    file_path      TEXT,
+    row_count BIGINT,
     PRIMARY KEY (table_name, partition_date)
 );
+
+
 CREATE TABLE IF NOT EXISTS etl_metadata.marts_loaded_partitions (
     mart_name VARCHAR(100) NOT NULL,
     partition_date DATE NOT NULL,
