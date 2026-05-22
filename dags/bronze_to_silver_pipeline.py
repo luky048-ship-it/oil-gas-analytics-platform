@@ -1,32 +1,31 @@
 # dags/bronze_to_silver_pipeline.py
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta
+from typing import Any, Dict, List
 
 import polars as pl
 from airflow import DAG
 from airflow.decorators import task
 from airflow.operators.empty import EmptyOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.task_group import TaskGroup
-# Import pipeline components from plugins
 from bronze_to_silver.config import SCHEMA_CONTRACTS
 from bronze_to_silver.deduplicator import deduplicate_dataset
-from bronze_to_silver.enricher import enrich_reference_data
-from bronze_to_silver.event_time_aggregator import aggregate_event_time_metrics
-from bronze_to_silver.metadata_utils import (get_last_watermark,
+from bronze_to_silver.metadata_utils import (get_bronze_partitions_from_db,
                                              publish_pipeline_metadata,
                                              update_pipeline_watermark)
 from bronze_to_silver.missing_handler import handle_missing_values
 from bronze_to_silver.normalizer import normalize_dataset
 from bronze_to_silver.outlier_detector import detect_outliers
-from bronze_to_silver.partition_discovery import \
-    discover_incremental_partitions
 from bronze_to_silver.pipeline_execution import PipelineExecutionResult
 from bronze_to_silver.quarantine_writer import write_quarantine_dataset
 from bronze_to_silver.s3_utils import (get_s3_storage_options,
                                        load_bronze_dataset)
-from bronze_to_silver.schema_validator import validate_dataset_schema
+from bronze_to_silver.schema_validator import (filter_by_data_quality,
+                                               validate_dataset_schema)
 from bronze_to_silver.silver_writer import write_silver_dataset
 
 logger = logging.getLogger(__name__)
@@ -35,180 +34,242 @@ DEFAULT_ARGS = {
     "owner": "data-platform",
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
-    "execution_timeout": timedelta(hours=4),
-    "sla": timedelta(hours=2),
+    "execution_timeout": timedelta(hours=2),
     "pool": "silver_processing",
 }
 
 with DAG(
     dag_id="bronze_to_silver_pipeline",
-    schedule="@daily",
-    start_date=datetime(2024, 1, 1),
+    schedule=None,
+    start_date=datetime(2025, 10, 1),
     catchup=True,
-    max_active_runs=1,
+    max_active_runs=3,
     default_args=DEFAULT_ARGS,
     tags=["bronze", "silver", "medallion", "production"],
-    doc_md=__doc__,
+    render_template_as_native_obj=True,
 ) as dag:
 
     start = EmptyOperator(task_id="start")
     finish = EmptyOperator(task_id="finish", trigger_rule="all_done")
 
-    @task(multiple_outputs=False)
-    def discover_partitions(dataset: str, **context) -> list[str]:
-        """
-        Discovers new partitions in the Bronze layer based on the dataset's watermark.
-        """
-        storage_options = get_s3_storage_options()
-        watermark = get_last_watermark(dataset)
+    @task
+    def parse_execution_dates(**context) -> List[str]:
+        """Извлекает диапазон дат из conf (бэкфилл) или использует ds."""
+        dag_run = context.get("dag_run")
+        conf = dag_run.conf if dag_run else {}
 
-        logger.info(f"Discovering partitions for {dataset} with watermark: {watermark}")
-        partitions = discover_incremental_partitions(
-            dataset=dataset, watermark=watermark, storage_options=storage_options
+        start_str = conf.get("start_date", context["ds"])
+        end_str = conf.get("end_date", context["ds"])
+
+        start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
+        end_date = datetime.strptime(end_str, "%Y-%m-%d").date()
+
+        dates = []
+        cur_date = start_date
+        while cur_date <= end_date:
+            dates.append(cur_date.isoformat())
+            cur_date += timedelta(days=1)
+
+        logger.info(f"Execution dates parsed: {dates}")
+        return dates
+
+    @task
+    def get_partitions_for_date(
+        dataset: str, target_date: str, is_fact: bool, **context
+    ) -> Dict[str, Any]:
+        """Получает пути к данным из метаданных Bronze для конкретной даты."""
+        paths = get_bronze_partitions_from_db(
+            table_name=dataset,
+            start_date=target_date,
+            end_date=target_date,
+            is_fact=is_fact,
         )
-        logger.info(f"Found {len(partitions)} new partitions for {dataset}.")
-        return partitions
+        return {
+            "dataset": dataset,
+            "target_date": target_date,
+            "is_fact": is_fact,
+            "paths": paths,
+        }
 
-    @task(multiple_outputs=False)
-    def process_dataset(dataset: str, partition_paths: list[str], **context) -> dict:
-        """
-        Executes the lazy transformation pipeline:
-        Load -> Validate -> Normalize -> Deduplicate -> Handle Missing -> Detect Outliers
-        -> Aggregate -> Enrich -> Write Silver & Quarantine -> Publish Metadata.
-        """
+    @task
+    def process_dataset(payload: Dict[str, Any], **context) -> Dict[str, Any]:
+        """Основной ETL процесс для одного датасета и одной даты (или full snapshot)."""
+        dataset = payload["dataset"]
+        target_date = payload["target_date"]
+        is_fact = payload["is_fact"]
+        partition_paths = payload["paths"]
+
         if not partition_paths:
-            logger.info(f"No new partitions to process for {dataset}.")
-            return {"status": "skipped", "dataset": dataset}
+            logger.info(
+                f"No bronze data found for {dataset} on {target_date}. Skipping."
+            )
+            return {"status": "skipped", "dataset": dataset, "date": target_date}
 
         t_start = datetime.now()
-        execution_date = context["ds"]
         storage_options = get_s3_storage_options()
         contract = SCHEMA_CONTRACTS[dataset]
-        watermark = get_last_watermark(dataset)
 
         # 1. Lazy Load
         lf = load_bronze_dataset(
             dataset_paths=partition_paths,
             storage_options=storage_options,
-            watermark=watermark,
+            watermark=None,
             time_column=contract.get("time_column"),
         )
 
-        # 2. Schema Validation (Eager check on schema only, no data materialization)
-        validate_dataset_schema(lf, dataset, contract["columns"])
+        # 2. Validate Schema
+        schema_valid_lf, schema_invalid_lf = validate_dataset_schema(
+            lf=lf,
+            dataset=dataset,
+            expected_schema=contract["columns"],
+        )
 
-        # 3. Normalize Types & Timestamps
+        schema_q_rows = 0
+        if schema_invalid_lf is not None:
+            schema_q_rows = write_quarantine_dataset(
+                invalid_lf=schema_invalid_lf,
+                dataset=dataset,
+                reason_code="schema_violation",
+                execution_date=target_date,
+                storage_options=storage_options,
+            )
+
+        # Если все строки невалидны из-за схемы — пропускаем дальнейшую обработку
+        if schema_q_rows > 0 and schema_valid_lf.select(pl.len()).collect().item() == 0:
+            logger.warning(
+                f"All rows quarantined due to schema violations. Skipping transformations."
+            )
+            return {
+                "status": "skipped",
+                "dataset": dataset,
+                "date": target_date,
+                "quarantined": schema_q_rows,
+            }
+
+        lf = schema_valid_lf
+
+        # 3 DQ
+        dq_valid_lf, dq_invalid_lf = filter_by_data_quality(
+            lf, validation_rules=contract.get("validation_rules", {})
+        )
+
+        dq_q_rows = 0
+        if dq_invalid_lf is not None:
+            dq_q_rows = write_quarantine_dataset(
+                invalid_lf=dq_invalid_lf,
+                dataset=dataset,
+                reason_code="dq_violation",
+                execution_date=target_date,
+                storage_options=storage_options,
+            )
+
+        lf = dq_valid_lf
+
+        # 4-6. Transformations
         lf = normalize_dataset(lf, dataset, contract)
-
-        # 4. Deduplicate
         lf = deduplicate_dataset(
             lf,
             key_columns=contract.get("dedup_key"),
             timestamp_column=contract.get("time_column"),
         )
+        lf = handle_missing_values(lf, contract.get("missing_rules", {}))
 
-        # 5. Handle Missing Values
-        lf = handle_missing_values(lf, dataset, contract.get("missing_rules", {}))
-
-        # 6. Outlier Detection (Split valid/invalid streams)
         valid_lf, invalid_lf = detect_outliers(
             lf,
-            dataset,
             monitored_columns=contract.get("outlier_columns", []),
             method="iqr",
             multiplier=3.0,
         )
 
-        # 7. Write Quarantine
-        q_rows = 0
+        # 7. quarantine
+        out_q_rows = 0
         if invalid_lf is not None:
-            q_rows = write_quarantine_dataset(
+            out_q_rows = write_quarantine_dataset(
                 invalid_lf=invalid_lf,
                 dataset=dataset,
-                reason_code="STATISTICAL_OUTLIER",
-                execution_date=execution_date,
+                reason_code="outlier",
+                execution_date=target_date,
                 storage_options=storage_options,
             )
 
-        # 8. Event-time Aggregation (if configured)
-        if "aggregation" in contract:
-            valid_lf = aggregate_event_time_metrics(
-                valid_lf, dataset, contract["aggregation"]
-            )
-
-        # 9. Enrich with Reference Data (if configured)
-        if "joins" in contract:
-            for join_def in contract["joins"]:
-                valid_lf = enrich_reference_data(
-                    lf=valid_lf,
-                    reference_dataset_path=f"s3://datalake/silver/{join_def['ref_dataset']}",
-                    join_key=join_def["key"],
-                    storage_options=storage_options,
-                    how=join_def.get("how", "left"),
-                )
-
-        # 10. Write Silver (Atomic overwrite_or_ignore)
+        # 8. Write Silver
         output_path = write_silver_dataset(
             lf=valid_lf,
             dataset=dataset,
-            partition_date=execution_date,
+            partition_date=target_date if is_fact else None,
             storage_options=storage_options,
         )
 
-        # 11. Calculate Metrics (The only `.collect()` on the valid data, highly optimized)
-        # We need row count and the max event time for the new watermark
-        time_col = contract.get("time_column")
-
-        if time_col and "aggregation" not in contract:
-            metrics_df = valid_lf.select(
-                [pl.len().alias("count"), pl.col(time_col).max().alias("max_time")]
-            ).collect()
-
-            processed_rows = metrics_df["count"].item(0)
-            new_watermark = metrics_df["max_time"].item(0)
-        else:
-            # If aggregated, time_col might have changed name or semantics, just count
-            processed_rows = valid_lf.select(pl.len()).collect().item()
-            new_watermark = None  # Handled below
-
-        # Fallback watermark to execution date if no time column or dataframe is empty
-        if not new_watermark:
-            new_watermark = datetime.strptime(execution_date, "%Y-%m-%d")
+        # 9. Metrics & Watermark
+        processed_rows = valid_lf.select(pl.len()).collect().item()
+        q_rows = schema_q_rows + dq_q_rows + out_q_rows
+        new_watermark = None
+        if is_fact and contract.get("time_column"):
+            max_time = (
+                valid_lf.select(pl.col(contract["time_column"]).max()).collect().item()
+            )
+            if max_time:
+                new_watermark = max_time
+                update_pipeline_watermark(dataset, new_watermark, target_date)
 
         t_end = datetime.now()
-        execution_time = (t_end - t_start).total_seconds()
-
         result = PipelineExecutionResult(
             dataset=dataset,
-            partition_date=execution_date,
+            partition_date=target_date,
             processed_rows=processed_rows,
             quarantined_rows=q_rows,
             output_path=output_path,
-            execution_time_sec=execution_time,
+            execution_time_sec=(t_end - t_start).total_seconds(),
             watermark=new_watermark,
         )
 
-        # 12. Update Watermark & Publish Metadata
-        update_pipeline_watermark(dataset, new_watermark, execution_date)
         publish_pipeline_metadata(result)
+        logger.info(f"Processed {dataset} for {target_date}: {processed_rows} rows.")
 
-        logger.info(
-            f"Successfully processed {dataset}: {processed_rows} rows. Watermark advanced to {new_watermark}."
-        )
-        return result.__dict__
+        return {
+            "dataset": result.dataset,
+            "partition_date": str(result.partition_date),
+            "processed_rows": result.processed_rows,
+            "quarantined_rows": result.quarantined_rows,
+            "status": "success",
+        }
 
-    # Dynamically generate tasks for all datasets defined in the contract
-    for ds_name in SCHEMA_CONTRACTS.keys():
-        with TaskGroup(group_id=f"process_group_{ds_name}") as tg:
+    # --- Оркестрация ---
+    dates_list = parse_execution_dates()
 
-            discovered_paths = discover_partitions.override(
-                task_id=f"discover_{ds_name}"
-            )(dataset=ds_name)
+    dimension_groups = []
+    fact_groups = []
 
-            processed_result = process_dataset.override(task_id=f"process_{ds_name}")(
-                dataset=ds_name, partition_paths=discovered_paths
-            )
+    for ds_name, cfg in SCHEMA_CONTRACTS.items():
+        is_fact = cfg.get("is_fact", False)
 
-            discovered_paths >> processed_result
+        with TaskGroup(group_id=f"process_{ds_name}") as tg:
+            if not is_fact:
+                partition_payload = get_partitions_for_date(
+                    dataset=ds_name, target_date="1900-01-01", is_fact=False
+                )
+                process_dataset(partition_payload)
+            else:
+                payloads = get_partitions_for_date.expand(
+                    dataset=ds_name, target_date=dates_list, is_fact=is_fact
+                )
+                process_dataset.expand(payload=payloads)
 
-        start >> tg >> finish
+        if is_fact:
+            fact_groups.append(tg)
+        else:
+            dimension_groups.append(tg)
+
+    start >> dimension_groups >> fact_groups >> finish
+
+    trigger_gold_dag = TriggerDagRunOperator(
+        task_id="trigger_silver_gold_pipeline",
+        trigger_dag_id="silver_gold_pipeline",
+        conf="{{ dag_run.conf }}",
+        wait_for_completion=False,
+        poke_interval=60,
+        allowed_states=["success"],
+        failed_states=["failed", "skipped"],
+    )
+
+    finish >> trigger_gold_dag

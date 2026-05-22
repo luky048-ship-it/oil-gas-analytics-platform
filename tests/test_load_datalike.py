@@ -179,6 +179,20 @@ def test_cast_batch_to_schema_decimal_to_float64():
     assert result.column("amount").to_pylist() == [123.45, 67.89]
 
 
+def test_cast_timestamp_to_microseconds():
+    source_schema = pa.schema([("ts", pa.timestamp("s"))])
+    batch = pa.RecordBatch.from_arrays(
+        [pa.array([datetime(2025, 10, 1, 12, 30, 45)])], schema=source_schema
+    )
+    target_schema = pa.schema([("ts", pa.timestamp("us"))])
+
+    result = _cast_batch_to_schema(batch, target_schema)
+
+    assert result.schema.field("ts").type == pa.timestamp("us")
+    # Проверяем, что микросекунды не потерялись
+    assert result.column("ts")[0].as_py() == datetime(2025, 10, 1, 12, 30, 45)
+
+
 def test_extract_load_fact_table_success(
     mock_postgres_hook, mock_s3fs, mock_env, context
 ):

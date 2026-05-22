@@ -8,15 +8,13 @@ def deduplicate_dataset(
     lf: pl.LazyFrame, key_columns: List[str], timestamp_column: Optional[str]
 ) -> pl.LazyFrame:
     """
-    Lazily deduplicates records based on natural keys.
-    If a timestamp column is provided, keeps the latest record.
+    Лениво дедуплицирует записи на основе естественных ключей.
+    Если указана колонка с временной меткой, сохраняет самую последнюю (актуальную) запись.
     """
     if not key_columns:
         return lf
 
     if timestamp_column:
-        # Sort by timestamp to ensure the 'last' record is the most recent
         lf = lf.sort(timestamp_column)
 
-    # Unique keeps the last row for each subset combination
-    return lf.unique(subset=key_columns, keep="last")
+    return lf.unique(subset=key_columns, keep="last", maintain_order=True)

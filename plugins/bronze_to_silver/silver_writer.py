@@ -1,46 +1,30 @@
 # plugins/bronze_to_silver/silver_writer.py
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import polars as pl
-import pyarrow.dataset as ds
-from pyarrow import fs
-
-from bronze_to_silver.s3_utils import get_s3_storage_options
 
 
 def write_silver_dataset(
     lf: pl.LazyFrame,
     dataset: str,
-    partition_date: str,
-    storage_options: Dict[str, Any] = None,
+    partition_date: Optional[str],
+    storage_options: Dict[str, Any],
     silver_base: str = "s3://datalake/silver",
 ) -> str:
-    if storage_options is None:
-        storage_options = get_s3_storage_options()
+    """
+    Записывает LazyFrame в Silver слой, используя sink_parquet для избежания OOM.
+    Для фактов формирует Hive-партицию по дате, для измерений пишет в один файл.
+    """
+    base_dir = f"{silver_base}/{dataset}"
 
-    lf_partitioned = lf.with_columns(pl.lit(partition_date).alias("partition_date"))
+    if partition_date:
+        target_path = f"{base_dir}/partition_date={partition_date}/data.parquet"
+    else:
+        target_path = f"{base_dir}/data.parquet"
 
-    s3_fs = fs.S3FileSystem(
-        access_key=storage_options.get("aws_access_key_id"),
-        secret_key=storage_options.get("aws_secret_access_key"),
-        endpoint_override=storage_options.get("aws_endpoint_url"),
-        region=storage_options.get("aws_region", "us-east-1"),
+    lf.sink_parquet(
+        target_path,
+        storage_options=storage_options,
     )
 
-    df = lf_partitioned.collect(streaming=True)
-    if df.height == 0:
-        return f"{silver_base}/{dataset}/partition_date={partition_date}"
-
-    arrow_table = df.to_arrow()
-    target_dir = f"{silver_base.replace('s3://', '')}/{dataset}"
-
-    ds.write_dataset(
-        data=arrow_table,
-        base_dir=target_dir,
-        filesystem=s3_fs,
-        format="parquet",
-        partitioning=ds.partitioning(field_names=["partition_date"]),
-        existing_data_behavior="overwrite_or_ignore",
-        max_partitions=1024,
-    )
-    return f"s3://{target_dir}/partition_date={partition_date}"
+    return target_path

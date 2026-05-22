@@ -20,7 +20,7 @@ from psycopg2 import sql
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Конфигурация таблиц и схем (жесткие словари)
+# Конфигурация таблиц и схем
 # ---------------------------------------------------------------------------
 
 TABLE_COLUMNS: Dict[str, List[str]] = {
@@ -145,7 +145,7 @@ EXPECTED_SCHEMAS: Dict[str, pa.Schema] = {
         [
             ("record_id", pa.int32()),
             ("well_id", pa.int32()),
-            ("timestamp", pa.timestamp("s")),
+            ("timestamp", pa.timestamp("us")),
             ("pump_speed_rpm", pa.float64()),
             ("pump_current", pa.float64()),
             ("pressure_in", pa.float64()),
@@ -176,7 +176,7 @@ EXPECTED_SCHEMAS: Dict[str, pa.Schema] = {
         [
             ("record_id", pa.int32()),
             ("pump_id", pa.int32()),
-            ("timestamp", pa.timestamp("s")),
+            ("timestamp", pa.timestamp("us")),
             ("temperature", pa.float64()),
             ("vibration", pa.float64()),
             ("current", pa.float64()),
@@ -188,7 +188,7 @@ EXPECTED_SCHEMAS: Dict[str, pa.Schema] = {
         [
             ("failure_id", pa.int32()),
             ("pump_id", pa.int32()),
-            ("failure_date", pa.timestamp("s")),
+            ("failure_date", pa.timestamp("us")),
             ("failure_type", pa.string()),
             ("downtime_hours", pa.float64()),
         ]
@@ -399,6 +399,17 @@ def _cast_batch_to_schema(
         else:
             col = pa.nulls(batch.num_rows, type=field.type)
         arrays.append(col)
+
+        if pa.types.is_timestamp(field.type):
+                col = col.cast(pa.timestamp("us"), safe=True)
+            elif field.type == pa.float64() and col.type != pa.float64():
+                col = col.cast(pa.float64(), safe=True)
+            elif col.type != field.type:
+                col = col.cast(field.type, safe=True)
+        else:
+            col = pa.nulls(batch.num_rows, type=field.type)
+        arrays.append(col)
+
     return pa.RecordBatch.from_arrays(arrays, schema=target_schema)
 
 
@@ -638,10 +649,10 @@ with DAG(
         extract_tasks.append(task)
 
     trigger_next = TriggerDagRunOperator(
-        task_id="trigger_silver_to_gold",
-        trigger_dag_id="silver_to_gold",
+        task_id="trigger_bronze_to_silver",
+        trigger_dag_id="bronze_to_silver_pipeline",
         conf="{{ dag_run.conf }}",
-        wait_for_completion=True,
+        wait_for_completion=False,
     )
 
     extract_tasks >> trigger_next
