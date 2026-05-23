@@ -21,9 +21,10 @@ x-airflow-common: &airflow-common
     dockerfile: Dockerfile
   environment: *airflow-env
   volumes:
-    - ./dags:/opt/airflow/dags
-    - ./logs:/opt/airflow/logs
-    - ./plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/ml_scripts:/opt/airflow/ml_scripts
   networks:
     - data_net
   logging: *default-logging
@@ -210,7 +211,7 @@ services:
     command:
       - -c
       - |
-        echo "Running database migration..."
+        echo "Running dataml:base migration..."
         airflow db migrate || airflow db init
         echo "Creating admin user..."
         airflow users create \
@@ -276,6 +277,22 @@ services:
         condition: service_completed_successfully
       airflow-init:
         condition: service_completed_successfully
+
+  # 7. ML
+  ml:
+    build:
+      context: .
+      dockerfile: Dockerfile.ml
+    image: ml-scripts:latest
+    entrypoint: ["echo", "ML image ready"]
+
+  airflow-scheduler:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  airflow-webserver:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 # ==========================================
 # СЕТИ И ВОЛЮМЫ

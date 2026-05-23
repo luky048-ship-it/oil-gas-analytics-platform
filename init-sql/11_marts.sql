@@ -154,3 +154,39 @@ COMMENT ON TABLE gold.mart_logistics IS 'Витрина логистики и п
 CREATE INDEX IF NOT EXISTS idx_mart_log_date ON gold.mart_logistics (date);
 CREATE INDEX IF NOT EXISTS idx_mart_log_driver ON gold.mart_logistics (driver_id);
 CREATE INDEX IF NOT EXISTS idx_mart_log_weather ON gold.mart_logistics (weather_conditions);
+
+
+-- =============================================
+-- PREDICTIVE ANALYTICS LAYER (ML Marts)
+-- =============================================
+
+-- 1. Предсказание дебита скважин
+CREATE TABLE IF NOT EXISTS gold.ml_flow_predictions (
+    well_id INTEGER NOT NULL,
+    date DATE NOT NULL,
+    actual_oil_ton NUMERIC(12,3),
+    predicted_oil_ton NUMERIC(12,3),
+    prediction_error NUMERIC(12,3),
+    model_version TEXT,
+    scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (well_id, date)
+);
+
+COMMENT ON TABLE gold.ml_flow_predictions IS 'Результаты ML-прогнозирования дебита скважин (Inference)';
+
+-- 2. Предсказание отказов и аномалий насосов
+CREATE TABLE IF NOT EXISTS gold.ml_pump_predictions (
+    record_id BIGINT PRIMARY KEY,
+    pump_id INTEGER NOT NULL,
+    timestamp TIMESTAMP NOT NULL,
+    is_anomaly_ml BOOLEAN NOT NULL,
+    risk_score NUMERIC(5,4) NOT NULL,
+    failure_probability NUMERIC(5,4) NOT NULL,
+    model_version TEXT,
+    scored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+COMMENT ON TABLE gold.ml_pump_predictions IS 'ML-скоринг аномалий и вероятности отказов насосов (Isolation Forest & Random Forest)';
+
+CREATE INDEX IF NOT EXISTS idx_ml_pump_timestamp ON gold.ml_pump_predictions (timestamp);
+CREATE INDEX IF NOT EXISTS idx_ml_pump_anomaly ON gold.ml_pump_predictions (is_anomaly_ml);
