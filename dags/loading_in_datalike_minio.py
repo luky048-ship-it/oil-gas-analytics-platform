@@ -4,12 +4,13 @@ import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import s3fs
 from airflow import DAG
+from airflow.operators.empty import EmptyOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import \
@@ -242,9 +243,6 @@ EXPECTED_SCHEMAS: Dict[str, pa.Schema] = {
 
 
 def get_s3_filesystem(conn_id: str = "aws_default") -> s3fs.S3FileSystem:
-    """
-    Создает объект s3fs.S3FileSystem для работы с MinIO.
-    """
     try:
         conn = BaseHook.get_connection(conn_id)
         endpoint = conn.extra_dejson.get("endpoint_url", "http://minio:9000")
@@ -272,11 +270,6 @@ def acquire_partition_lock(
     dag_run_id: str,
     stale_minutes: int = 30,
 ) -> bool:
-    """
-    Устанавливает блокировку партиции в таблице метаданных.
-    Возвращает True, если блокировка успешно установлена (или была stale и перезаписана).
-    Возвращает False, если партиция уже загружена (status='loaded').
-    """
     hook = PostgresHook(postgres_conn_id="postgres_default")
     with hook.get_conn() as conn:
         with conn.cursor() as cur:
@@ -346,10 +339,6 @@ def release_partition_lock(
     file_path: str | None = None,
     row_count: int = 0,
 ) -> None:
-    """
-    Снимает блокировку и фиксирует статус загрузки.
-    При успехе сохраняет путь к файлу и количество строк.
-    """
     hook = PostgresHook(postgres_conn_id="postgres_default")
     with hook.get_conn() as conn:
         with conn.cursor() as cur:
@@ -375,18 +364,13 @@ def release_partition_lock(
 
 
 # ---------------------------------------------------------------------------
-# Приведение типов и кастинг decimal -> float64
+# Приведение типов
 # ---------------------------------------------------------------------------
 
 
 def _cast_batch_to_schema(
     batch: pa.RecordBatch, target_schema: pa.Schema
 ) -> pa.RecordBatch:
-    """
-    Приводит RecordBatch к целевой схеме.
-    Для полей, которые в target_schema имеют тип float64, а в исходном decimal,
-    выполняется явное преобразование.
-    """
     arrays = []
     for field in target_schema:
         if field.name in batch.schema.names:
@@ -399,17 +383,6 @@ def _cast_batch_to_schema(
         else:
             col = pa.nulls(batch.num_rows, type=field.type)
         arrays.append(col)
-
-        if pa.types.is_timestamp(field.type):
-                col = col.cast(pa.timestamp("us"), safe=True)
-            elif field.type == pa.float64() and col.type != pa.float64():
-                col = col.cast(pa.float64(), safe=True)
-            elif col.type != field.type:
-                col = col.cast(field.type, safe=True)
-        else:
-            col = pa.nulls(batch.num_rows, type=field.type)
-        arrays.append(col)
-
     return pa.RecordBatch.from_arrays(arrays, schema=target_schema)
 
 
@@ -425,12 +398,6 @@ def extract_load(
     next_ds: str,
     **context: Any,
 ) -> None:
-    """
-    Извлекает данные из PostgreSQL и записывает в MinIO.
-    Поддерживает диапазон дат через dag_run.conf (start_date, end_date).
-    Для fact-таблиц обрабатывает каждый день в диапазоне с блокировкой.
-    Для non-fact таблиц загружает один раз, если данных ещё нет.
-    """
     dag_run = context.get("dag_run")
     conf = dag_run.conf if dag_run else {}
     dag_run_id = dag_run.run_id if dag_run else "manual"
@@ -454,13 +421,9 @@ def extract_load(
             dates.append(cur_date.isoformat())
             cur_date += timedelta(days=1)
     else:
-        partition_dir = f"{bucket}/bronze/{table_name}"
-        if fs.exists(partition_dir) and any(
-            f.endswith(".parquet") for f in fs.ls(partition_dir)
-        ):
-            logger.info("Non-fact table %s already loaded, skipping", table_name)
-            return
-        dates = ["1900-01-01"]  # фиктивная дата для блокировки
+        dates = ["1900-01-01"]
+
+    pg_hook = PostgresHook(postgres_conn_id="postgres_default")
 
     for date_str in dates:
         if is_fact:
@@ -479,23 +442,24 @@ def extract_load(
                 locked = acquire_partition_lock(table_name, date_str, dag_run_id)
                 if not locked:
                     logger.info(
-                        "Partition %s/%s already loaded, skipping", table_name, date_str
+                        "Partition %s/%s already locked or loaded, skipping",
+                        table_name,
+                        date_str,
                     )
                     continue
 
             col_identifiers = [sql.Identifier(col) for col in columns]
             if is_fact and date_col:
                 next_day = (
-                    datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)
-                ).isoformat()
+                    (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1))
+                    .date()
+                    .isoformat()
+                )
                 where_clause = sql.SQL("WHERE {} >= %s AND {} < %s").format(
                     sql.Identifier(date_col), sql.Identifier(date_col)
                 )
                 params = (f"{date_str} 00:00:00", f"{next_day} 00:00:00")
-                # Сортировка: сначала дата, потом первичный ключ
-                order_by = sql.SQL("ORDER BY {}, {}").format(
-                    sql.Identifier(date_col), sql.Identifier(columns[0])
-                )
+                order_by = sql.SQL("")
             else:
                 where_clause = sql.SQL("")
                 params = ()
@@ -508,9 +472,9 @@ def extract_load(
                 order_by,
             )
 
-            pg_hook = PostgresHook(postgres_conn_id="postgres_default")
+            cursor_name = f"cur_{table_name}_{uuid.uuid4().hex[:8]}"
+
             with pg_hook.get_conn() as conn:
-                cursor_name = f"cur_{table_name}_{uuid.uuid4().hex[:8]}"
                 with conn.cursor(name=cursor_name) as cur:
                     cur.itersize = 100_000
                     cur.execute(query, params)
@@ -519,6 +483,7 @@ def extract_load(
                         chunk = cur.fetchmany(100_000)
                         if not chunk:
                             break
+
                         arrays = [pa.array(col) for col in zip(*chunk)]
                         batch = pa.RecordBatch.from_arrays(arrays, names=columns)
                         batch = _cast_batch_to_schema(batch, expected_schema)
@@ -527,8 +492,33 @@ def extract_load(
                             file_uuid = uuid.uuid4().hex
                             parquet_filename = f"data_{file_uuid}.parquet"
                             target_parquet_path = f"{partition_dir}/{parquet_filename}"
-                            if not fs.exists(partition_dir):
+
+                            if fs.exists(partition_dir):
+                                try:
+                                    old_files = fs.ls(partition_dir)
+                                    for f in old_files:
+                                        if f.endswith(".parquet"):
+                                            logger.info(
+                                                "Removing old parquet file to prevent duplicates: %s",
+                                                f,
+                                            )
+                                            fs.rm(f)
+                                except Exception as clean_err:
+                                    logger.error(
+                                        "Critical: Failed to clean up old files in %s: %s",
+                                        partition_dir,
+                                        clean_err,
+                                    )
+                                    raise RuntimeError(
+                                        f"Safety cleanup failed for {partition_dir}. Aborting."
+                                    ) from clean_err
+                            else:
+                                logger.info(
+                                    "Partition directory %s does not exist. Creating.",
+                                    partition_dir,
+                                )
                                 fs.mkdir(partition_dir)
+
                             s3_file = fs.open(target_parquet_path, "wb")
                             writer = pq.ParquetWriter(
                                 s3_file,
@@ -538,15 +528,12 @@ def extract_load(
                                 data_page_size=1048576,
                                 write_batch_size=100000,
                             )
+
                         writer.write_batch(batch)
                         rows_count += len(chunk)
 
             if rows_count == 0:
-                logger.info(
-                    "Zero rows extracted for %s/%s, marking as loaded",
-                    table_name,
-                    date_str,
-                )
+                logger.info("Zero rows extracted for %s/%s", table_name, date_str)
                 if is_fact:
                     release_partition_lock(
                         table_name, date_str, success=True, file_path=None, row_count=0
@@ -554,19 +541,19 @@ def extract_load(
                     locked = False
                 continue
 
-            if writer is None:
-                raise RuntimeError("No data written but rows_count>0")
+            if writer:
+                writer.close()
+                writer = None
+            if s3_file:
+                s3_file.close()
+                s3_file = None
 
-            writer.close()
-            writer = None
-            s3_file.close()
-            s3_file = None
-
-            pf = pq.ParquetFile(fs.open(target_parquet_path, "rb"))
-            if pf.metadata.num_rows != rows_count:
-                raise ValueError(
-                    f"Integrity check failed: expected {rows_count} rows, got {pf.metadata.num_rows}"
-                )
+            with fs.open(target_parquet_path, "rb") as f:
+                pf = pq.ParquetFile(f)
+                if pf.metadata.num_rows != rows_count:
+                    raise ValueError(
+                        f"Integrity check failed: expected {rows_count} rows, got {pf.metadata.num_rows}"
+                    )
 
             if is_fact:
                 release_partition_lock(
@@ -585,11 +572,18 @@ def extract_load(
         except Exception as e:
             logger.error("ETL failed for %s/%s: %s", table_name, date_str, str(e))
             if target_parquet_path and fs.exists(target_parquet_path):
-                fs.rm(target_parquet_path)
-            if locked:
+                try:
+                    fs.rm(target_parquet_path)
+                except Exception as rm_err:
+                    logger.error(
+                        "Could not remove broken parquet file %s: %s",
+                        target_parquet_path,
+                        rm_err,
+                    )
+
+            if is_fact and locked:
                 try:
                     release_partition_lock(table_name, date_str, success=False)
-                    locked = False
                 except Exception as unlock_err:
                     logger.error("Failed to release lock on error: %s", unlock_err)
             raise
@@ -605,11 +599,6 @@ def extract_load(
                     s3_file.close()
                 except Exception:
                     pass
-            if locked:
-                try:
-                    release_partition_lock(table_name, date_str, success=False)
-                except Exception:
-                    logger.exception("Failed to release lock in finally")
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +618,7 @@ with DAG(
     default_args=default_args,
     schedule="@daily",
     start_date=datetime(2025, 10, 1),
-    catchup=True,
+    catchup=False,
     tags=["enterprise", "etl", "minio", "data-quality"],
     max_active_runs=1,
 ) as dag:
@@ -651,8 +640,9 @@ with DAG(
     trigger_next = TriggerDagRunOperator(
         task_id="trigger_bronze_to_silver",
         trigger_dag_id="bronze_to_silver_pipeline",
-        conf="{{ dag_run.conf }}",
+        conf="{{ dag_run.conf }}",  # type: ignore
         wait_for_completion=False,
     )
 
     extract_tasks >> trigger_next
+

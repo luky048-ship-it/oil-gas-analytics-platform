@@ -1,7 +1,6 @@
 # dags/bronze_to_silver_pipeline.py
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List

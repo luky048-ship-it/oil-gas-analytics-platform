@@ -1,6 +1,13 @@
-polars
-pyarrow
+# --- БИЗНЕС-ЛОГИКА (Жесткая фиксация, чтобы код не сломался) ---
+polars==1.40.1
+duckdb==1.1.3
+adbc-driver-manager==1.11.0
+adbc-driver-postgresql==1.11.0
+
+# --- ИНФРАСТРУКТУРА (Подстраиваемся под Airflow 2.10.4) ---
+pyarrow==16.1.0
+
+# Драйверы. Не пишем версии! 
 s3fs
 psycopg2-binary
-adbc-driver-postgresql
-pandas
+

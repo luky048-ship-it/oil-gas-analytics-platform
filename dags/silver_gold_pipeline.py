@@ -6,7 +6,6 @@ from airflow import DAG
 from airflow.decorators import task
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import get_current_context
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.utils.task_group import TaskGroup
 from gold_layer.config import ANALYSIS_PARAMS, MART_CONTRACTS
 from gold_layer.constants import (SILVER_DELIVERIES, SILVER_DRIVERS,
@@ -46,30 +45,30 @@ with DAG(
     @task
     def parse_execution_dates(**context) -> list[str]:
         dag_run = context.get("dag_run")
-        conf = dag_run.conf if dag_run else {}
+        conf = dag_run.conf if dag_run and dag_run.conf else {}
 
-        start_str = conf.get("start_date", context["ds"])
-        end_str = conf.get("end_date", context["ds"])
+        start_str = conf.get("start_date")
+        end_str = conf.get("end_date")
 
-        start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
-        end_date = datetime.strptime(end_str, "%Y-%m-%d").date()
+        if start_str and end_str:
+            start_date = datetime.strptime(start_str, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_str, "%Y-%m-%d").date()
+            dates = []
+            cur = start_date
+            while cur <= end_date:
+                dates.append(cur.isoformat())
+                cur += timedelta(days=1)
+            logger.info(f"Manual override: dates resolved to {dates}")
+            return dates
 
-        dates = []
-        cur = start_date
-        while cur <= end_date:
-            dates.append(cur.isoformat())
-            cur += timedelta(days=1)
+        last_dt = get_last_watermark(TABLE_MART_PRODUCTION)
+        new_dates = discover_new_partitions(SILVER_PRODUCTION, last_dt)
+        if not new_dates:
+            logger.info("No new partitions discovered.")
+            return []
 
-        if "start_date" not in conf and "end_date" not in conf:
-            last_dt = get_last_watermark("mart_production")
-            new_dates = discover_new_partitions(SILVER_PRODUCTION, last_dt)
-            if not new_dates:
-                logger.info("No new partitions discovered.")
-                return []
-            dates = [d for d in dates if d in new_dates]
-
-        logger.info(f"Execution dates resolved to: {dates}")
-        return dates
+        logger.info(f"Execution dates resolved to: {new_dates}")
+        return sorted(new_dates)
 
     with TaskGroup(group_id="process_marts") as process_marts:
 
@@ -102,7 +101,7 @@ with DAG(
 
             if result.inserted_rows > 0:
                 for dt in dates:
-                    update_mart_watermark(spec.table_name.split(".")[-1], dt, run_id)
+                    update_mart_watermark(spec.table_name, dt, run_id)
 
         @task
         def build_well_kpi_task(dates: list[str]) -> None:
@@ -147,7 +146,7 @@ with DAG(
 
             if result.inserted_rows > 0:
                 for dt in dates:
-                    update_mart_watermark(spec.table_name.split(".")[-1], dt, run_id)
+                    update_mart_watermark(spec.table_name, dt, run_id)
 
         @task
         def build_failures_task(dates: list[str]) -> None:
@@ -171,7 +170,7 @@ with DAG(
 
             if result.inserted_rows > 0:
                 for dt in dates:
-                    update_mart_watermark(spec.table_name.split(".")[-1], dt, run_id)
+                    update_mart_watermark(spec.table_name, dt, run_id)
 
         @task
         def build_logistics_task(dates: list[str]) -> None:
@@ -195,7 +194,7 @@ with DAG(
 
             if result.inserted_rows > 0:
                 for dt in dates:
-                    update_mart_watermark(spec.table_name.split(".")[-1], dt, run_id)
+                    update_mart_watermark(spec.table_name, dt, run_id)
 
         dates = parse_execution_dates()
 
@@ -207,14 +206,4 @@ with DAG(
         prod >> well_kpi
         [well_kpi, failures, logistics] >> finish
 
-    trigger_next = TriggerDagRunOperator(
-        task_id="trigger_next_pipeline",
-        trigger_dag_id="gold_to_serving_pipeline",
-        conf="{{ dag_run.conf }}",
-        wait_for_completion=False,
-        poke_interval=60,
-        allowed_states=["success"],
-        failed_states=["failed", "skipped"],
-    )
-
-    start >> dates >> process_marts >> trigger_next
+    start >> dates >> process_marts

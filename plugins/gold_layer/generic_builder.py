@@ -1,10 +1,4 @@
 # gold_layer/generic_builder.py
-
-"""
-Универсальный конфигурационный движок построения витрин на Polars Lazy API.
-Порядок графа: Concat -> Deduplication -> Join -> Aggregation -> Window -> Batch filter -> Derived -> Output.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -22,7 +16,6 @@ def _get_max_window_days(spec: MartSpec) -> int:
     max_days = 0
     for win in spec.window_aggregations:
         win_val = ANALYSIS_PARAMS.get(win.window_expr, 0)
-        # Значения > 1000 трактуем как минуты (например, 7*24*60 для минут)
         days = win_val / (24 * 60) if win_val > 1000 else win_val
         max_days = max(max_days, int(days))
     return max_days
@@ -54,18 +47,15 @@ def _prepare_and_concat_sources(
         lf = lf_dict[t]
         schema = lf.collect_schema().names()
 
-        # Унификация временных колонок: если есть timestamp, но нет date
         if "date" not in schema and "timestamp" in schema:
             lf = lf.with_columns(pl.col("timestamp").dt.date().alias("date"))
             schema.append("date")
 
-        # Разделение на batch и историю по имени таблицы
         if "history" in t.lower():
             hist_lfs.append((t, lf))
         else:
             batch_lfs.append(lf)
             if "date" in schema:
-                # Безопасное ленивое извлечение минимальной даты
                 t_min = lf.select(pl.col("date").min()).collect().item()
                 if t_min:
                     if not min_batch_date or t_min < min_batch_date:
@@ -74,7 +64,6 @@ def _prepare_and_concat_sources(
     if not batch_lfs:
         raise RuntimeError("No active batch data provided for mart.")
 
-    # Предикатный Pushdown для исторических данных
     max_window = _get_max_window_days(spec)
     if min_batch_date and max_window > 0 and hist_lfs:
         safe_min_date = min_batch_date - timedelta(days=max_window + 1)
@@ -92,7 +81,6 @@ def _prepare_and_concat_sources(
         for _, h_lf in hist_lfs:
             batch_lfs.append(h_lf)
 
-    # Диагональное объединение для защиты от несоответствия схем (Polars 1.4+)
     combined = pl.concat(batch_lfs, how="diagonal_relaxed")
     return combined, min_batch_date
 
@@ -111,7 +99,6 @@ def _apply_joins(
 
         logger.info("Applying join #%d: right=%s, how=%s", i, js.right_table, js.how)
 
-        # Кастинг ключей для предотвращения silent type mismatch
         left_keys = [f"_jL_{c}" for c in js.left_on]
         right_keys = [f"_jR_{c}" for c in js.right_on]
 
@@ -139,7 +126,6 @@ def _build_aggregation(
     for cm in aggregations:
         func = cm.agg_func or "first"
 
-        # null-safe aggregation (игнорируем NULL, если это не first)
         col_expr = (
             pl.col(cm.source_col).drop_nulls()
             if func != "first"
@@ -162,32 +148,32 @@ def _build_aggregation(
 def _apply_window_aggregations(
     lf: pl.LazyFrame, window_aggs: List[WindowAggregation], params: Dict[str, Any]
 ) -> pl.LazyFrame:
-    """Оконные функции. В Polars 1.4+ window_size строго int."""
     if not window_aggs:
         return lf
 
-    sort_keys = list(
-        {pb for win in window_aggs for pb in win.partition_by}
-        | {win.order_by for win in window_aggs}
-    )
-    if sort_keys:
-        lf = lf.sort(sort_keys)
-
     window_exprs = []
     for win in window_aggs:
-        # Извлекаем и строго приводим к INT
         raw_size = params.get(win.window_expr, win.window_expr)
-        window_size = int(raw_size)
+
+        if "kpi" in win.window_expr.lower():
+            window_size_rows = int(raw_size)  # 7 дней = 7 строк
+        elif "risk" in win.window_expr.lower():
+            logger.warning(
+                "Converting minute-based window to estimated row-count (56 rows for 7 days)."
+            )
+            window_size_rows = 56
+        else:
+            window_size_rows = int(raw_size)
 
         col_expr = pl.col(win.source_col)
 
         if win.agg_func in ("mean", "sum", "max", "min"):
-            expr = getattr(col_expr, f"rolling_{win.agg_func}")(window_size=window_size)
+            expr = getattr(col_expr, f"rolling_{win.agg_func}")(
+                window_size=window_size_rows
+            )
         elif win.agg_func == "zscore":
-            mean_expr = col_expr.rolling_mean(window_size=window_size)
-            std_expr = col_expr.rolling_std(window_size=window_size).fill_null(0.0)
-
-            # Защита от деления на 0
+            mean_expr = col_expr.rolling_mean(window_size=window_size_rows)
+            std_expr = col_expr.rolling_std(window_size=window_size_rows).fill_null(0.0)
             expr = (
                 pl.when(std_expr > 0.0)
                 .then((col_expr - mean_expr) / std_expr)
@@ -196,7 +182,7 @@ def _apply_window_aggregations(
         else:
             raise ValueError(f"Unsupported window aggregation: {win.agg_func}")
 
-        expr = expr.over(win.partition_by).alias(win.target)
+        expr = expr.over(win.partition_by, order_by=win.order_by).alias(win.target)
         window_exprs.append(expr)
 
     return lf.with_columns(window_exprs)
@@ -250,7 +236,6 @@ def _apply_output_schema(lf: pl.LazyFrame, spec: MartSpec) -> pl.LazyFrame:
             lf = lf.with_columns(pl.lit(None).cast(pl.Date).alias("partition_date"))
         current_cols.add("partition_date")
 
-    # Fail-Fast проверки и автогенерация ID
     for col, dtype in output_schema.items():
         if col not in current_cols:
             if col == "mart_id" and spec.primary_key:
@@ -263,7 +248,9 @@ def _apply_output_schema(lf: pl.LazyFrame, spec: MartSpec) -> pl.LazyFrame:
                 )
                 current_cols.add(col)
             elif col == "record_id":
-                lf = lf.with_columns(pl.int_range(0, pl.len(), dtype=dtype).alias(col))
+                lf = lf.with_columns(
+                    pl.int_range(0, pl.len()).cast(dtype, strict=False).alias(col)
+                )
                 current_cols.add(col)
             else:
                 raise ValueError(

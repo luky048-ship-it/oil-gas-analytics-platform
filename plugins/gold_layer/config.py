@@ -24,7 +24,7 @@ class ColumnMapping:
     target: str  # имя колонки в витрине
     source_table: str  # silver-таблица
     source_col: str  # исходная колонка
-    agg_func: Optional[str] = None  # "sum", "mean", "max", "min", "first" и т.д.
+    agg_func: Optional[str] = None  # "sum", "mean", "max", "min", "first"
     default: Any = None  # значение при отсутствии данных
 
 
@@ -38,7 +38,7 @@ class WindowAggregation:
     agg_func: str  # "mean", "sum", "max", "min"
     partition_by: List[str]  # например, ["well_id"]
     order_by: str  # колонка времени
-    window_expr: str  # ссылка на глобальный параметр, например "risk_rolling_window"
+    window_expr: str  # ссылка на глобальный параметр
 
 
 @dataclass
@@ -53,11 +53,11 @@ class JoinSpec:
 
 @dataclass
 class DerivedColumn:
-    """Вычисляемая колонка на основе expression (Polars или строкового выражения)."""
+    """Вычисляемая колонка на основе expression."""
 
     target: str
-    expression: str  # например, "pl.col('oil_ton') / pl.col('daily_target_ton')"
-    condition: Optional[str] = None  # условие применения (необязательно)
+    expression: str  # например, "pl.col('oil_ton') / pl.col('target_ton')"
+    condition: Optional[str] = None  # условие применения
 
 
 @dataclass
@@ -74,23 +74,26 @@ class MartSpec:
 
     table_name: str
     # Источники данных
-    source_tables: List[str]  # имена silver-таблиц (без схемы)
+    source_tables: List[str]
     # Агрегации обычные (group_by)
     group_by: Optional[List[str]] = None
     aggregations: List[ColumnMapping] = field(default_factory=list)
     # Оконные агрегации
     window_aggregations: List[WindowAggregation] = field(default_factory=list)
-    # Джойны между silver-таблицами (порядок важен)
+    # Джойны между silver-таблицами
     joins: List[JoinSpec] = field(default_factory=list)
-    # Вычисляемые колонки (выполняются после агрегаций и джойнов)
+    # Вычисляемые колонки
     derived_columns: List[DerivedColumn] = field(default_factory=list)
     # Финальный набор колонок и их Polars-типы (соответствует DDL)
-    output_schema: Dict[str, pl.DataType] = field(default_factory=dict)
-    # Первичный ключ (бизнес-гранула) / уникальность
+    # ИСПРАВЛЕНИЕ: Добавлен Union с type[pl.DataType] для совместимости с классами типов
+    output_schema: Dict[str, Union[pl.DataType, type[pl.DataType]]] = field(
+        default_factory=dict
+    )
+    # Первичный ключ
     primary_key: List[str] = field(default_factory=list)
-    # Правила контроля качества
+    # Правила качества
     business_rules: List[BusinessRule] = field(default_factory=list)
-    # Партиционирование при записи в Postgres (если поддерживается)
+    # Партиционирование
     partition_column: Optional[str] = None
 
 
@@ -115,7 +118,10 @@ MART_CONTRACTS = {
             ColumnMapping("avg_temperature", "well_telemetry", "temperature", "mean"),
             ColumnMapping("avg_pressure", "well_telemetry", "pressure", "mean"),
             ColumnMapping(
-                "avg_pump_speed_rpm", "well_telemetry", "pump_speed_rpm", "mean"
+                "avg_pump_speed_rpm",
+                "well_telemetry",
+                "pump_speed_rpm",
+                "mean",
             ),
             ColumnMapping(
                 "avg_oil_flow_rate", "well_telemetry", "oil_flow_rate", "mean"
@@ -135,15 +141,17 @@ MART_CONTRACTS = {
             DerivedColumn("daily_target_ton", "pl.col('daily_oil_ton')"),
             DerivedColumn(
                 "production_efficiency",
-                "pl.when(pl.col('daily_target_ton') > 0).then(pl.col('oil_ton') / pl.col('daily_target_ton')).otherwise(0.0)",
+                "pl.when(pl.col('daily_target_ton') > 0)"
+                ".then(pl.col('oil_ton') / pl.col('daily_target_ton'))"
+                ".otherwise(0.0)",
             ),
             DerivedColumn(
                 "downtime_pct",
-                "pl.min_horizontal(pl.col('downtime_hours') / 24 * 100, 100.0)",
+                "pl.min_horizontal(" "pl.col('downtime_hours') / 24 * 100, 100.0" ")",
             ),
         ],
         output_schema={
-            "mart_id": pl.Int64,  # auto-generated surrogate
+            "mart_id": pl.Int64,
             "well_id": pl.Int32,
             "date": pl.Date,
             "oil_ton": pl.Float64,
@@ -160,7 +168,7 @@ MART_CONTRACTS = {
             "production_efficiency": pl.Float64,
             "downtime_pct": pl.Float64,
             "load_timestamp": pl.Datetime("us"),
-            "partition_date": pl.Date,  # генерируется из date
+            "partition_date": pl.Date,
         },
         primary_key=["well_id", "date"],
         business_rules=[
@@ -174,8 +182,6 @@ MART_CONTRACTS = {
         table_name="gold.mart_well_kpi",
         source_tables=["mart_production_batch", "mart_production_history"],
         group_by=["well_id", "date"],
-        # Базовые ежедневные метрики сначала получаем через агрегацию,
-        # затем оконные функции поверх них.
         aggregations=[
             ColumnMapping("oil_ton", "production", "oil_ton", "first", 0.0),
             ColumnMapping(
@@ -183,7 +189,6 @@ MART_CONTRACTS = {
             ),
             ColumnMapping("daily_target_ton", "well_targets", "daily_oil_ton", "first"),
         ],
-        # К этим daily-данным применяем оконные функции
         window_aggregations=[
             WindowAggregation(
                 "avg_daily_oil",
@@ -221,7 +226,6 @@ MART_CONTRACTS = {
                 order_by="date",
                 window_expr="kpi_rolling_window",
             ),
-            # Для среднего простоя за окно
             WindowAggregation(
                 "avg_downtime_pct",
                 "production",
@@ -235,20 +239,30 @@ MART_CONTRACTS = {
         derived_columns=[
             DerivedColumn(
                 "avg_efficiency",
-                "pl.when(pl.col('daily_target_ton') > 0).then(pl.col('oil_ton') / pl.col('daily_target_ton')).otherwise(0.0)",
+                "pl.when(pl.col('daily_target_ton') > 0)"
+                ".then(pl.col('oil_ton') / pl.col('daily_target_ton'))"
+                ".otherwise(0.0)",
             ),
-            # Ранжирование и группа производительности
             DerivedColumn(
                 "production_rank",
-                "pl.col('oil_ton').rank('dense', descending=True).over('date')",
+                "pl.col('oil_ton').rank('dense', descending=True)" ".over('date')",
             ),
             DerivedColumn(
                 "performance_group",
-                "pl.when(pl.col('production_rank') <= pl.col('production_rank').max().over('date') * 0.25)"
+                "pl.when("
+                "pl.col('production_rank') <= "
+                "pl.col('production_rank').max().over('date') * 0.25"
+                ")"
                 ".then(pl.lit('Top'))"
-                ".when(pl.col('production_rank') <= pl.col('production_rank').max().over('date') * 0.5)"
+                ".when("
+                "pl.col('production_rank') <= "
+                "pl.col('production_rank').max().over('date') * 0.5"
+                ")"
                 ".then(pl.lit('Good'))"
-                ".when(pl.col('production_rank') <= pl.col('production_rank').max().over('date') * 0.75)"
+                ".when("
+                "pl.col('production_rank') <= "
+                "pl.col('production_rank').max().over('date') * 0.75"
+                ")"
                 ".then(pl.lit('Average'))"
                 ".otherwise(pl.lit('Poor'))",
             ),
@@ -276,15 +290,11 @@ MART_CONTRACTS = {
     "mart_failures": MartSpec(
         table_name="gold.mart_failures",
         source_tables=["pump_sensors", "pump_failures", "pumps"],
-        # Джойним сенсоры с информацией об отказах и справочником насосов
         joins=[
             JoinSpec(
                 right_table="pump_failures",
                 left_on=["pump_id", "timestamp"],
-                right_on=[
-                    "pump_id",
-                    "failure_date",
-                ],  # связь по времени (примерное совпадение, в реальности нужна логика nearest, здесь упрощено)
+                right_on=["pump_id", "failure_date"],
                 how="left",
             ),
             JoinSpec(
@@ -294,7 +304,6 @@ MART_CONTRACTS = {
                 how="left",
             ),
         ],
-        # Оконные функции для z-оценок за rolling window (в минутах)
         window_aggregations=[
             WindowAggregation(
                 "vibration_zscore",
@@ -318,29 +327,35 @@ MART_CONTRACTS = {
         derived_columns=[
             DerivedColumn(
                 "is_anomaly",
-                "(pl.col('vibration_zscore').abs() > ANALYSIS_PARAMS['z_score_threshold']) | "
-                "(pl.col('temperature_zscore').abs() > ANALYSIS_PARAMS['z_score_threshold'])",
+                "(pl.col('vibration_zscore').abs() > "
+                "ANALYSIS_PARAMS['z_score_threshold']) | "
+                "(pl.col('temperature_zscore').abs() > "
+                "ANALYSIS_PARAMS['z_score_threshold'])",
             ),
             DerivedColumn(
                 "anomaly_reason",
-                "pl.concat_list("
-                "pl.when(pl.col('vibration_zscore').abs() > ANALYSIS_PARAMS['z_score_threshold']).then(pl.lit('vibration')), "
-                "pl.when(pl.col('temperature_zscore').abs() > ANALYSIS_PARAMS['z_score_threshold']).then(pl.lit('temperature'))"
-                ").list.drop_nulls()",
+                "pl.concat_list(["
+                "pl.when(pl.col('vibration_zscore').abs() > "
+                "ANALYSIS_PARAMS['z_score_threshold'])"
+                ".then(pl.lit('vibration')).otherwise(pl.lit(None)), "
+                "pl.when(pl.col('temperature_zscore').abs() > "
+                "ANALYSIS_PARAMS['z_score_threshold'])"
+                ".then(pl.lit('temperature')).otherwise(pl.lit(None))"
+                "]).list.drop_nulls()",
             ),
             DerivedColumn("is_failure", "pl.col('failure_type').is_not_null()"),
-            # Упрощённый риск на основе z-оценок
             DerivedColumn(
                 "risk_score",
-                "(pl.col('vibration_zscore').abs().clip(0, 4) + pl.col('temperature_zscore').abs().clip(0, 4)) / 8",
+                "(pl.col('vibration_zscore').abs().clip(0, 4) + "
+                "pl.col('temperature_zscore').abs().clip(0, 4)) / 8",
             ),
-            DerivedColumn("failure_probability", "pl.col('risk_score')"),  # placeholder
+            DerivedColumn("failure_probability", "pl.col('risk_score')"),
         ],
         output_schema={
-            "record_id": pl.Int64,  # автоинкремент из сырых сенсоров
+            "record_id": pl.Int64,
             "pump_id": pl.Int32,
-            "well_id": pl.Int32,  # добавляется из pumps
-            "date": pl.Date,  # из timestamp
+            "well_id": pl.Int32,
+            "date": pl.Date,
             "timestamp": pl.Datetime("us"),
             "temperature": pl.Float64,
             "vibration": pl.Float64,
@@ -385,17 +400,25 @@ MART_CONTRACTS = {
         derived_columns=[
             DerivedColumn(
                 "cost_per_km",
-                "pl.when(pl.col('distance_km') > 0).then(pl.col('cost_usd') / pl.col('distance_km')).otherwise(0.0)",
+                "pl.when(pl.col('distance_km') > 0)"
+                ".then(pl.col('cost_usd') / pl.col('distance_km'))"
+                ".otherwise(0.0)",
             ),
             DerivedColumn(
                 "cost_per_ton",
-                "pl.when(pl.col('volume_ton') > 0).then(pl.col('cost_usd') / pl.col('volume_ton')).otherwise(0.0)",
+                "pl.when(pl.col('volume_ton') > 0)"
+                ".then(pl.col('cost_usd') / pl.col('volume_ton'))"
+                ".otherwise(0.0)",
             ),
             DerivedColumn("delay_flag", "pl.col('delay_hours') > 0"),
             DerivedColumn(
                 "weather_impact",
-                "pl.when(pl.col('weather_conditions').str.contains('storm|rain|snow')).then(pl.lit('high'))"
-                ".when(pl.col('weather_conditions').str.contains('cloud|wind')).then(pl.lit('medium'))"
+                "pl.when(pl.col('weather_conditions').str.contains("
+                "'storm|rain|snow'"
+                ")).then(pl.lit('high'))"
+                ".when(pl.col('weather_conditions').str.contains("
+                "'cloud|wind'"
+                ")).then(pl.lit('medium'))"
                 ".otherwise(pl.lit('low'))",
             ),
         ],
