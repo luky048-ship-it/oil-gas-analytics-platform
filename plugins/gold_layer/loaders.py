@@ -1,70 +1,140 @@
-import polars as pl
+# plugins/gold_layer/loaders.py
 import logging
-from datetime import datetime, date
+from datetime import date, datetime
 from typing import List, Optional
-from gold_layer.constants import SILVER_PREFIX
-from gold_layer.connections import get_s3_fs
 
-def load_silver_dataset(table_name: str, partition_dates: Optional[List[str]] = None) -> pl.LazyFrame:
+import polars as pl
+from gold_layer.connections import (get_postgres_uri, get_s3_fs,
+                                    get_s3_storage_options)
+from gold_layer.constants import SILVER_PREFIX
+
+logger = logging.getLogger(__name__)
+
+
+def load_silver_dataset(
+    table_name: str, partition_dates: Optional[List[str]] = None
+) -> pl.LazyFrame:
     """
-    Loads a Silver dataset as a Polars LazyFrame.
-    If partition_dates is provided, it filters by partition_date.
-    Uses scan_parquet for efficiency.
+    Создаёт ленивый граф вычислений (LazyFrame) над Parquet-файлами в S3.
+    Использует нативные storage_options Polars для безопасного подключения к MinIO/S3
+    (поддержка aws_allow_http). Автоматически извлекает Hive-партиции.
     """
     fs = get_s3_fs()
-    base_path = f"{SILVER_PREFIX}/{table_name}"
+    s3_options = get_s3_storage_options()
 
-    # We use glob pattern to scan all partitions if no specific dates are provided
-    # Structure: silver/{table_name}/partition_date=YYYY-MM-DD/*.parquet
+    base_prefix = (
+        SILVER_PREFIX if SILVER_PREFIX.startswith("s3://") else f"s3://{SILVER_PREFIX}"
+    )
+    base_path = f"{base_prefix}/{table_name}"
+
     if partition_dates:
-        paths = [f"{base_path}/partition_date={dt}/*.parquet" for dt in partition_dates]
-        # Check which paths actually exist to avoid Polars error
         existing_paths = []
-        for p in paths:
-            if fs.glob(p.replace("s3://", "")):
-                existing_paths.append(p)
+        for dt in partition_dates:
+            glob_path = f"{base_path}/partition_date={dt}/*.parquet"
+            if fs.glob(glob_path.replace("s3://", "")):
+                existing_paths.append(glob_path)
 
         if not existing_paths:
-            logging.warning(f"No parquet files found for {table_name} in partitions {partition_dates}")
+            logger.warning(
+                "No parquet files found for table '%s' in partitions: %s",
+                table_name,
+                partition_dates,
+            )
             return pl.LazyFrame()
 
-        return pl.scan_parquet(existing_paths, storage_options=fs.storage_options)
+        logger.info(
+            "Loading '%s' from %d selected partitions.", table_name, len(existing_paths)
+        )
+        target_path = existing_paths
     else:
-        path = f"{base_path}/**/*.parquet"
-        return pl.scan_parquet(path, storage_options=fs.storage_options)
+        target_path = f"{base_path}/**/*.parquet"
+        logger.info("Loading entire history for '%s'.", table_name)
 
-def discover_new_partitions(table_name: str, last_watermark: Optional[date]) -> List[str]:
+    return pl.scan_parquet(
+        target_path, storage_options=s3_options, hive_partitioning=True
+    )
+
+
+def discover_new_partitions(
+    table_name: str, last_watermark: Optional[date]
+) -> List[str]:
     """
-    Lists directories in S3 and returns partition dates that are newer than last_watermark.
+    Сканирует иерархию директорий Silver-слоя для поиска новых партиций.
+    Сравнивает извлечённые даты с last_watermark.
     """
+    if isinstance(last_watermark, str):
+        try:
+            last_watermark = datetime.strptime(last_watermark, "%Y-%m-%d").date()
+        except ValueError:
+            logger.error("Invalid watermark string format: %s", last_watermark)
+            last_watermark = None
+    elif isinstance(last_watermark, datetime):
+        last_watermark = last_watermark.date()
+
     fs = get_s3_fs()
     base_path = f"{SILVER_PREFIX.replace('s3://', '')}/{table_name}"
 
     try:
         partition_dirs = fs.ls(base_path)
     except FileNotFoundError:
-        logging.error(f"Silver table {table_name} not found at {base_path}")
+        logger.error("Silver table '%s' not found at '%s'.", table_name, base_path)
         return []
 
     new_dates = []
     for d in partition_dirs:
-        # Expected format: silver/table/partition_date=YYYY-MM-DD
-        if "partition_date=" in d:
-            date_str = d.split("partition_date=")[-1]
-            try:
-                dt = datetime.strptime(date_str, "%Y-%m-%d").date()
-                if last_watermark is None or dt > last_watermark:
-                    new_dates.append(date_str)
-            except ValueError:
-                continue
+        if "partition_date=" not in d:
+            continue
 
-    return sorted(new_dates)
+        date_str = d.split("partition_date=")[-1]
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+            if last_watermark is None or dt > last_watermark:
+                new_dates.append(date_str)
+        except ValueError:
+            logger.debug("Skipping invalid partition directory format: %s", d)
+            continue
 
-def load_gold_dataset(table_name: str) -> pl.LazyFrame:
+    sorted_dates = sorted(new_dates)
+    logger.info(
+        "Discovered %d new partitions for '%s' (watermark: %s).",
+        len(sorted_dates),
+        table_name,
+        last_watermark,
+    )
+
+    return sorted_dates
+
+
+def load_gold_dataset(table_name: str, query: Optional[str] = None) -> pl.LazyFrame:
     """
-    Loads a Gold dataset from Postgres as a Polars LazyFrame.
+    Синхронно вычитывает Gold-датасет из Postgres и переводит его в LazyFrame.
+
+    Рекомендуется передавать параметр `query` для ограничения объёма (Pushdown),
+    так как данные сначала полностью загружаются в RAM.
     """
-    from gold_layer.connections import get_postgres_uri
     uri = get_postgres_uri()
-    df = pl.read_database(f"SELECT * FROM {table_name}", connection=uri)
-    return df.lazy()
+
+    sql = query if query else f"SELECT * FROM {table_name}"
+
+    if not query:
+        logger.warning(
+            "Loading entire Gold table '%s' without limits. "
+            "Consider using a specific query for large tables to avoid OOM.",
+            table_name,
+        )
+
+    try:
+        try:
+            df = pl.read_database(sql, connection=uri, engine="adbc")
+        except (ImportError, RuntimeError):
+            logger.warning(
+                "ADBC not available, falling back to default Polars DB engine."
+            )
+            df = pl.read_database(sql, connection=uri)
+
+        logger.info("Successfully loaded %d records from '%s'.", len(df), table_name)
+        return df.lazy()
+
+    except Exception as e:
+        logger.error("Failed to load Gold dataset '%s': %s", table_name, e)
+        raise RuntimeError(f"Database read error for {table_name}") from e

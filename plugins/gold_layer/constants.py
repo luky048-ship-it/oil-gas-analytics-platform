@@ -1,3 +1,4 @@
+# /plugins/gold_layer/constants.py
 import os
 
 # Connections

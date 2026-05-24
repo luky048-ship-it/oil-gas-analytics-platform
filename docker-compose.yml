@@ -218,8 +218,13 @@ services:
           --lastname User \
           --role Admin \
           --email admin@example.com \
-          --password "${_AIRFLOW_WWW_USER_PASSWORD:-admin}" || true
-        echo "Initialization complete."    
+          --password "${_AIRFLOW_WWW_USER_PASSWORD:-admin}" || true\
+
+        echo "Creating resource pools..."
+        airflow pool create gold_pool 10 --description "Gold layer processing" || true
+        airflow pool create silver_processing 20 --description "Silver layer processing" || true
+        
+        echo "Initialization complete."
     environment:
       <<: *airflow-env
       _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME}
