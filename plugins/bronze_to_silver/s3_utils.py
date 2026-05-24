@@ -12,9 +12,6 @@ logger = logging.getLogger(__name__)
 
 
 def get_s3_storage_options(conn_id: str = "aws_default") -> Dict[str, Any]:
-    """
-    Извлекает креды S3 из Airflow Connection (совместимо с 2.10.4).
-    """
     try:
         conn = BaseHook.get_connection(conn_id)
         extra = conn.extra_dejson
@@ -22,23 +19,28 @@ def get_s3_storage_options(conn_id: str = "aws_default") -> Dict[str, Any]:
         options = {
             "aws_access_key_id": conn.login,
             "aws_secret_access_key": conn.password,
+            "aws_allow_http": "true",
         }
 
         if extra.get("endpoint_url"):
-            options["endpoint_url"] = extra["endpoint_url"]
+            options["aws_endpoint_url"] = extra["endpoint_url"]
+
         if extra.get("region_name"):
-            options["region"] = extra["region_name"]
+            options["aws_region"] = extra["region_name"]
 
         return options
+
     except Exception as e:
         logger.warning(
             f"Connection {conn_id} not found: {e}. Using local MinIO defaults."
         )
+
         return {
             "aws_access_key_id": "admin",
             "aws_secret_access_key": "password",
-            "endpoint_url": "http://minio:9000",
-            "region": "us-east-1",
+            "aws_endpoint_url": "http://minio:9000",
+            "aws_region": "us-east-1",
+            "aws_allow_http": "true",
         }
 
 
@@ -54,16 +56,7 @@ def load_bronze_dataset(
     if not dataset_paths:
         return pl.LazyFrame()
 
-    pl_options = {
-        "aws_access_key_id": storage_options.get("aws_access_key_id"),
-        "aws_secret_access_key": storage_options.get("aws_secret_access_key"),
-        "aws_allow_http": True,
-    }
-
-    if "endpoint_url" in storage_options:
-        pl_options["endpoint_url"] = storage_options["endpoint_url"]
-    if "region" in storage_options:
-        pl_options["region"] = storage_options["region"]
+    pl_options = storage_options
 
     lf = pl.scan_parquet(
         source=dataset_paths,

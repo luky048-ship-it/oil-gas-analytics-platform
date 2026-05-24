@@ -27,6 +27,7 @@ x-airflow-common: &airflow-common
   networks:
     - data_net
   logging: *default-logging
+  user: "50000:0"
 
 x-superset-common: &superset-common
   image: apache/superset:3.1.0

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def validate_dataframe(df: pl.DataFrame, spec: MartSpec) -> None:
-    """Data Quality First"""
+    """Обеспечение качества данных перед фиксацией транзакции."""
     if df.is_empty():
         return
 
@@ -59,77 +59,21 @@ def validate_dataframe(df: pl.DataFrame, spec: MartSpec) -> None:
                         raise ValueError(msg)
                     logger.warning(msg)
             except Exception as e:
-                logger.error("Failed to parse rule '%s': %s", rule.rule, e)
-                if isinstance(e, ValueError):
-                    raise
-
-
-def create_staging_table(target_table: str, staging_table: str) -> None:
-    with get_psycopg2_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                CREATE_STAGING_TABLE.format(
-                    staging_table=staging_table, target_table=target_table
-                )
-            )
-        conn.commit()
-    logger.debug("Staging table '%s' is ready.", staging_table)
-
-
-def load_to_staging_adbc(df: pl.DataFrame, staging_table: str) -> None:
-    uri = get_postgres_uri()
-    arrow_table = df.to_arrow()
-
-    schema_name, table_name = staging_table.split(".")
-
-    with adbc_dbapi.connect(uri) as conn:
-        with conn.cursor() as cur:
-            cur.execute(f"SET search_path TO {schema_name};")
-
-            cur.adbc_ingest(table_name, arrow_table, mode="append")
-
-
-def execute_atomic_swap(
-    target_table: str, staging_table: str, partition_dates: List[str]
-) -> int:
-    inserted_rows = 0
-    with get_psycopg2_conn() as conn:
-        with conn.cursor() as cur:
-            logger.info("Swapping partitions: %s", partition_dates)
-
-            cur.execute(
-                DELETE_PARTITION_FROM_GOLD.format(target_table=target_table),
-                (partition_dates,),
-            )
-
-            cur.execute(
-                INSERT_FROM_STAGING_TO_GOLD.format(
-                    target_table=target_table, staging_table=staging_table
-                ),
-                (partition_dates,),
-            )
-            inserted_rows = cur.rowcount
-
-        conn.commit()
-    return inserted_rows
-
-
-def cleanup_staging(staging_table: str) -> None:
-    try:
-        with get_psycopg2_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(DROP_STAGING_TABLE.format(staging_table=staging_table))
-            conn.commit()
-    except Exception as e:
-        logger.warning("Failed to drop staging table '%s': %s", staging_table, e)
+                logger.error("Failed to evaluate rule '%s': %s", rule.rule, e)
+                if isinstance(e, ValueError) or (
+                    hasattr(rule, "severity") and rule.severity in ("CRITICAL", "HIGH")
+                ):
+                    raise ValueError(
+                        f"DQ Evaluation aborted due to error in high-severity rule '{rule.rule}': {e}"
+                    ) from e
 
 
 def write_mart(
     df: pl.DataFrame, spec: MartSpec, partition_dates: List[str]
 ) -> MartBuildResult:
-    """Безопасная транзакционная запись с изоляцией процессов."""
     start_time = time.time()
     processed_rows = len(df)
+    partition_dates_str = [str(d) for d in partition_dates]
 
     if processed_rows == 0:
         return MartBuildResult(
@@ -137,7 +81,9 @@ def write_mart(
             processed_rows=0,
             inserted_rows=0,
             execution_time_sec=time.time() - start_time,
-            partition_date=",".join(partition_dates) if partition_dates else "None",
+            partition_date=(
+                ",".join(partition_dates_str) if partition_dates_str else "None"
+            ),
             watermark=None,  # type: ignore
         )
 
@@ -154,6 +100,10 @@ def write_mart(
     try:
         validate_dataframe(df, spec)
 
+        excluded_cols = {"mart_id", "record_id", "load_timestamp", "partition_date"}
+        business_columns = [col for col in df.columns if col not in excluded_cols]
+        columns_sql_str = ", ".join(business_columns)
+
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -165,27 +115,34 @@ def write_mart(
         logger.info(
             "Loading %d rows to '%s' via ADBC...", processed_rows, staging_table_full
         )
+        df_to_load = df.select(business_columns)
+
         with adbc_dbapi.connect(get_postgres_uri()) as adbc_conn:
             with adbc_conn.cursor() as adbc_cur:
                 adbc_cur.adbc_ingest(
                     table_name=staging_table_name,
-                    data=df.to_arrow(),
+                    data=df_to_load.to_arrow(),
                     mode="append",
                     db_schema_name=STAGING_SCHEMA,
                 )
 
         with conn:
             with conn.cursor() as cur:
+                logger.info(
+                    "Deleting partitions from gold table: %s", partition_dates_str
+                )
                 cur.execute(
                     DELETE_PARTITION_FROM_GOLD.format(target_table=target_table),
-                    (partition_dates,),
+                    (partition_dates_str,),
                 )
-                cur.execute(
-                    INSERT_FROM_STAGING_TO_GOLD.format(
-                        target_table=target_table, staging_table=staging_table_full
-                    ),
-                    (partition_dates,),
+
+                insert_query = INSERT_FROM_STAGING_TO_GOLD.format(
+                    target_table=target_table,
+                    staging_table=staging_table_full,
+                    columns=columns_sql_str,
                 )
+                logger.info("Inserting records from staging into gold table...")
+                cur.execute(insert_query, (partition_dates_str,))
                 inserted_rows = cur.rowcount
 
     finally:
@@ -215,6 +172,6 @@ def write_mart(
         processed_rows=processed_rows,
         inserted_rows=inserted_rows,
         execution_time_sec=exec_time,
-        partition_date=",".join(partition_dates),
+        partition_date=",".join(partition_dates_str),
         watermark=None,  # type: ignore
     )

@@ -268,10 +268,27 @@ def acquire_partition_lock(
     partition_date: str,
     dag_run_id: str,
     stale_minutes: int = 30,
+    force_reprocess: bool = False,
 ) -> bool:
     hook = PostgresHook(postgres_conn_id="postgres_default")
     with hook.get_conn() as conn:
         with conn.cursor() as cur:
+
+            if force_reprocess:
+                logger.info(
+                    "Force reprocess enabled. Resetting status for %s/%s",
+                    table_name,
+                    partition_date,
+                )
+                cur.execute(
+                    """
+                    DELETE FROM etl_metadata.loaded_partitions
+                    WHERE table_name = %s AND partition_date = %s
+                    """,
+                    (table_name, partition_date),
+                )
+                conn.commit()
+
             cur.execute(
                 """
                 INSERT INTO etl_metadata.loaded_partitions
@@ -394,12 +411,13 @@ def extract_load(
     table_name: str,
     cfg: Dict[str, Any],
     ds: str,
-    next_ds: str,
     **context: Any,
 ) -> None:
     dag_run = context.get("dag_run")
     conf = dag_run.conf if dag_run else {}
     dag_run_id = dag_run.run_id if dag_run else "manual"
+
+    force_reprocess = conf.get("force_reprocess", False) if conf else False
 
     fs = get_s3_filesystem()
     bucket = os.getenv("MINIO_DEFAULT_BUCKET", "datalake")
@@ -438,7 +456,12 @@ def extract_load(
 
         try:
             if is_fact:
-                locked = acquire_partition_lock(table_name, date_str, dag_run_id)
+                locked = acquire_partition_lock(
+                    table_name=table_name,
+                    partition_date=date_str,
+                    dag_run_id=dag_run_id,
+                    force_reprocess=force_reprocess,
+                )
                 if not locked:
                     logger.info(
                         "Partition %s/%s already locked or loaded, skipping",
@@ -631,7 +654,6 @@ with DAG(
                 "table_name": tbl,
                 "cfg": cfg,
                 "ds": "{{ ds }}",
-                "next_ds": "{{ next_ds }}",
             },
         )
         extract_tasks.append(task)
@@ -639,7 +661,11 @@ with DAG(
     trigger_next = TriggerDagRunOperator(
         task_id="trigger_bronze_to_silver",
         trigger_dag_id="bronze_to_silver_pipeline",
-        conf="{{ dag_run.conf }}",
+        conf={
+            "start_date": "{{ dag_run.conf.start_date if (dag_run and dag_run.conf and 'start_date' in dag_run.conf) else ds }}",
+            "end_date": "{{ dag_run.conf.end_date if (dag_run and dag_run.conf and 'end_date' in dag_run.conf) else ds }}",
+            "force_reprocess": "{{ dag_run.conf.force_reprocess if (dag_run and dag_run.conf and 'force_reprocess' in dag_run.conf) else False }}",
+        },
         wait_for_completion=False,
     )
 

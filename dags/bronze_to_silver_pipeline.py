@@ -10,6 +10,7 @@ from airflow import DAG
 from airflow.decorators import task
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.utils.state import DagRunState
 from airflow.utils.task_group import TaskGroup
 from bronze_to_silver.config import SCHEMA_CONTRACTS
 from bronze_to_silver.deduplicator import deduplicate_dataset
@@ -49,7 +50,7 @@ with DAG(
 ) as dag:
 
     start = EmptyOperator(task_id="start")
-    finish = EmptyOperator(task_id="finish", trigger_rule="all_done")
+    finish = EmptyOperator(task_id="finish")
 
     @task
     def parse_execution_dates(**context) -> List[str]:
@@ -74,7 +75,7 @@ with DAG(
 
     @task
     def get_partitions_for_date(
-        dataset: str, target_date: str, is_fact: bool, **context
+        dataset: str, target_date: str, is_fact: bool
     ) -> Dict[str, Any]:
         """Получает пути к данным из метаданных Bronze для конкретной даты."""
         paths = get_bronze_partitions_from_db(
@@ -245,9 +246,10 @@ with DAG(
                 )
                 process_dataset(partition_payload)
             else:
-                payloads = get_partitions_for_date.expand(
-                    dataset=ds_name, target_date=dates_list, is_fact=is_fact
-                )
+                payloads = get_partitions_for_date.partial(
+                    dataset=ds_name, is_fact=is_fact
+                ).expand(target_date=dates_list)
+
                 process_dataset.expand(payload=payloads)
 
         if is_fact:
@@ -268,11 +270,15 @@ with DAG(
     trigger_gold_dag = TriggerDagRunOperator(
         task_id="trigger_silver_gold_pipeline",
         trigger_dag_id="silver_gold_pipeline",
-        conf="{{ dag_run.conf }}",
+        conf={
+            "start_date": "{{ dag_run.conf.start_date if (dag_run and dag_run.conf and 'start_date' in dag_run.conf) else ds }}",
+            "end_date": "{{ dag_run.conf.end_date if (dag_run and dag_run.conf and 'end_date' in dag_run.conf) else ds }}",
+            "force_reprocess": "{{ dag_run.conf.force_reprocess if (dag_run and dag_run.conf and 'force_reprocess' in dag_run.conf) else False }}",
+        },
         wait_for_completion=False,
         poke_interval=60,
-        allowed_states=["success"],
-        failed_states=["failed", "skipped"],
+        allowed_states=[DagRunState.SUCCESS],
+        failed_states=[DagRunState.FAILED],
     )
 
     finish >> trigger_gold_dag

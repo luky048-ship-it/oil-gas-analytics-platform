@@ -40,7 +40,7 @@ with DAG(
 ) as dag:
 
     start = EmptyOperator(task_id="start")
-    finish = EmptyOperator(task_id="finish", trigger_rule="all_done")
+    finish = EmptyOperator(task_id="finish")
 
     @task
     def parse_execution_dates(**context) -> list[str]:
@@ -58,17 +58,22 @@ with DAG(
             while cur <= end_date:
                 dates.append(cur.isoformat())
                 cur += timedelta(days=1)
-            logger.info(f"Manual override: dates resolved to {dates}")
+            logger.info(f"Execution dates resolved from upstream conf: {dates}")
             return dates
 
+        logger.warning(
+            "No date parameters provided in conf. Falling back to watermark discovery."
+        )
         last_dt = get_last_watermark(TABLE_MART_PRODUCTION)
         new_dates = discover_new_partitions(SILVER_PRODUCTION, last_dt)
         if not new_dates:
             logger.info("No new partitions discovered.")
             return []
 
-        logger.info(f"Execution dates resolved to: {new_dates}")
+        logger.info(f"Execution dates resolved via watermark: {new_dates}")
         return sorted(new_dates)
+
+    dates = parse_execution_dates()
 
     with TaskGroup(group_id="process_marts") as process_marts:
 
@@ -96,12 +101,10 @@ with DAG(
             )
 
             df = lf_result.collect()
+            write_mart(df, spec, dates)
 
-            result = write_mart(df, spec, dates)
-
-            if result.inserted_rows > 0:
-                for dt in dates:
-                    update_mart_watermark(spec.table_name, dt, run_id)
+            for dt in dates:
+                update_mart_watermark(spec.table_name, dt, run_id)
 
         @task
         def build_well_kpi_task(dates: list[str]) -> None:
@@ -142,11 +145,10 @@ with DAG(
             )
 
             df = lf_result.collect()
-            result = write_mart(df, spec, dates)
+            write_mart(df, spec, dates)
 
-            if result.inserted_rows > 0:
-                for dt in dates:
-                    update_mart_watermark(spec.table_name, dt, run_id)
+            for dt in dates:
+                update_mart_watermark(spec.table_name, dt, run_id)
 
         @task
         def build_failures_task(dates: list[str]) -> None:
@@ -166,11 +168,10 @@ with DAG(
             )
 
             df = lf_result.collect()
-            result = write_mart(df, spec, dates)
+            write_mart(df, spec, dates)
 
-            if result.inserted_rows > 0:
-                for dt in dates:
-                    update_mart_watermark(spec.table_name, dt, run_id)
+            for dt in dates:
+                update_mart_watermark(spec.table_name, dt, run_id)
 
         @task
         def build_logistics_task(dates: list[str]) -> None:
@@ -190,13 +191,10 @@ with DAG(
             )
 
             df = lf_result.collect()
-            result = write_mart(df, spec, dates)
+            write_mart(df, spec, dates)
 
-            if result.inserted_rows > 0:
-                for dt in dates:
-                    update_mart_watermark(spec.table_name, dt, run_id)
-
-        dates = parse_execution_dates()
+            for dt in dates:
+                update_mart_watermark(spec.table_name, dt, run_id)
 
         prod = build_production_task(dates)
         well_kpi = build_well_kpi_task(dates)
@@ -206,4 +204,4 @@ with DAG(
         prod >> well_kpi
         [well_kpi, failures, logistics] >> finish
 
-    start >> dates >> process_marts
+    start >> process_marts
