@@ -1,4 +1,4 @@
-# plugins/bronze_to_silver/outlier_detector.py
+# /plugins/bronze_to_silver/outlier_detector.py
 from typing import List, Optional, Tuple
 
 import polars as pl
@@ -11,9 +11,7 @@ def detect_outliers(
     multiplier: float = 3.0,
 ) -> Tuple[pl.LazyFrame, Optional[pl.LazyFrame]]:
     """
-    Обнаруживает статистические выбросы с использованием метода IQR (межквартильный размах).
-    Возвращает кортеж из двух LazyFrame: (valid_lf, invalid_lf).
-    Если список отслеживаемых колонок пуст, возвращает (исходный_lf, None).
+    Обнаруживает статистические выбросы с использованием метода IQR.
     """
     if not monitored_columns:
         return lf, None
@@ -31,7 +29,7 @@ def detect_outliers(
             condition = (pl.col(col) < lower_bound) | (pl.col(col) > upper_bound)
             outlier_conditions.append(condition)
 
-    is_outlier_expr = pl.any_horizontal(*outlier_conditions)
+    is_outlier_expr = pl.any_horizontal(*outlier_conditions).fill_null(False)
 
     valid_lf = lf.filter(~is_outlier_expr)
     invalid_lf = lf.filter(is_outlier_expr)

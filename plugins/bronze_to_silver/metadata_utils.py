@@ -1,4 +1,4 @@
-# plugins/bronze_to_silver/metadata_utils.py
+# /plugins/bronze_to_silver/metadata_utils.py
 import logging
 from datetime import datetime
 from typing import List, Optional
@@ -83,9 +83,12 @@ def get_last_watermark(
 def update_pipeline_watermark(
     dataset: str,
     watermark: datetime,
-    execution_date: str,
     conn_id: str = DEFAULT_CONN_ID,
 ) -> None:
+    """
+    Обновляет вотермарк для отслеживания инкрементальной обработки.
+    Параметр `execution_date` удален как избыточный.
+    """
     query = """
         INSERT INTO etl_metadata.pipeline_watermarks (dataset, last_processed_watermark, updated_at)
         VALUES (%s, %s, NOW())
@@ -110,7 +113,7 @@ def publish_pipeline_metadata(
     query = """
         INSERT INTO etl_metadata.pipeline_executions (
             dataset, partition_date, processed_rows, quarantined_rows,
-            execution_time_sec, watermark, status, updated_at
+            execution_time_sec, watermark, status
         ) VALUES %s
         ON CONFLICT (dataset, partition_date) DO UPDATE SET
             processed_rows = EXCLUDED.processed_rows,

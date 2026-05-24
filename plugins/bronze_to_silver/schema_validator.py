@@ -1,4 +1,4 @@
-# plugins/bronze_to_silver/schema_validator.py
+# /plugins/bronze_to_silver/schema_validator.py
 import logging
 from typing import Any, Dict, Tuple
 
@@ -14,10 +14,6 @@ def validate_dataset_schema(
 ) -> Tuple[pl.LazyFrame, pl.LazyFrame]:
     """
     Проверяет схему LazyFrame и разделяет данные на valid и invalid.
-
-    Returns:
-        Tuple[pl.LazyFrame, pl.LazyFrame]: (valid_lf, invalid_lf)
-        Если схема некорректна — все строки считаются невалидными.
     """
     actual_schema = lf.collect_schema()
 
@@ -55,8 +51,7 @@ def validate_dataset_schema(
     new_columns = [col for col in actual_schema if col not in expected_schema]
     if new_columns:
         logger.warning(
-            f"Dataset '{dataset}' has new unexpected columns: {new_columns}. "
-            "They will be ignored or passed through."
+            f"Dataset '{dataset}' has new unexpected columns: {new_columns}. They will be ignored."
         )
 
     empty_lf = lf.filter(pl.lit(False))
@@ -69,27 +64,33 @@ def filter_by_data_quality(
 ) -> Tuple[pl.LazyFrame, pl.LazyFrame]:
     """
     Применяет бизнес-правила (enums, ranges, custom) и разделяет данные на valid и invalid.
-    Не бросает исключения, а возвращает кортеж для последующей записи в карантин.
+    Не выкидывает исключения, предотвращая потерю NULL-записей до этапа обработки пропусков.
     """
     if not validation_rules:
         return lf, lf.filter(pl.lit(False))
 
     is_invalid_expr = pl.lit(False)
 
-    # 1. Enums
+    # 1. Enums (проверяется только если значение не NULL)
     enums = validation_rules.get("enums", {})
     for col_name, allowed_values in enums.items():
-        is_invalid_expr = is_invalid_expr | ~pl.col(col_name).is_in(allowed_values)
+        is_invalid_expr = is_invalid_expr | (
+            pl.col(col_name).is_not_null() & ~pl.col(col_name).is_in(allowed_values)
+        )
 
-    # 2. Ranges
+    # 2. Ranges (проверяется только если значение не NULL, сохраняя логику SQL Check Constraints)
     ranges = validation_rules.get("ranges", {})
     for col_name, limits in ranges.items():
+        col_expr = pl.col(col_name)
+        range_fail_expr = pl.lit(False)
         if "min" in limits:
-            is_invalid_expr = is_invalid_expr | (pl.col(col_name) < limits["min"])
+            range_fail_expr = range_fail_expr | (col_expr < limits["min"])
         if "max" in limits:
-            is_invalid_expr = is_invalid_expr | (pl.col(col_name) > limits["max"])
+            range_fail_expr = range_fail_expr | (col_expr > limits["max"])
 
-    # 3. Custom rules (SQL-like)
+        is_invalid_expr = is_invalid_expr | (col_expr.is_not_null() & range_fail_expr)
+
+    # 3. Custom rules (SQL-like. Если возвращает NULL/Unknown - проверка пропускается по стандарту SQL)
     custom_rules = validation_rules.get("custom", [])
     for rule in custom_rules:
         rule_str = rule["rule"]
@@ -99,9 +100,12 @@ def filter_by_data_quality(
             .replace(" is null", " IS NULL")
         )
         try:
-            is_invalid_expr = is_invalid_expr | (~pl.sql_expr(sql_rule))
+            parsed_expr = pl.sql_expr(sql_rule)
+            is_invalid_expr = is_invalid_expr | (~parsed_expr).fill_null(False)
         except Exception as e:
             logger.warning(f"Failed to parse custom DQ rule '{rule_str}': {e}")
+
+    is_invalid_expr = is_invalid_expr.fill_null(False)
 
     valid_lf = lf.filter(~is_invalid_expr)
     invalid_lf = lf.filter(is_invalid_expr)

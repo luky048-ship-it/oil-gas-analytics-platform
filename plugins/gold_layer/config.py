@@ -85,7 +85,6 @@ class MartSpec:
     # Вычисляемые колонки
     derived_columns: List[DerivedColumn] = field(default_factory=list)
     # Финальный набор колонок и их Polars-типы (соответствует DDL)
-    # ИСПРАВЛЕНИЕ: Добавлен Union с type[pl.DataType] для совместимости с классами типов
     output_schema: Dict[str, Union[pl.DataType, type[pl.DataType]]] = field(
         default_factory=dict
     )

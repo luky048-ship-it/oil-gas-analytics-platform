@@ -99,18 +99,29 @@ def _apply_joins(
 
         logger.info("Applying join #%d: right=%s, how=%s", i, js.right_table, js.how)
 
-        left_keys = [f"_jL_{c}" for c in js.left_on]
-        right_keys = [f"_jR_{c}" for c in js.right_on]
+        left_schema = lf.collect_schema()
+        right_schema = right_lf.collect_schema()
 
-        for col, new_col in zip(js.left_on, left_keys):
-            lf = lf.with_columns(pl.col(col).cast(pl.String).alias(new_col))
-        for col, new_col in zip(js.right_on, right_keys):
-            right_lf = right_lf.with_columns(pl.col(col).cast(pl.String).alias(new_col))
+        left_cols = set(left_schema.names())
+        right_cols_to_drop = [
+            c for c in right_schema.names() if c in left_cols and c not in js.right_on
+        ]
+        if right_cols_to_drop:
+            right_lf = right_lf.drop(right_cols_to_drop)
 
-        lf = lf.join(right_lf, left_on=left_keys, right_on=right_keys, how=js.how)
-        lf = lf.drop(left_keys + right_keys)
+        for l_col, r_col in zip(js.left_on, js.right_on):
+            l_type = left_schema[l_col]
+            r_type = right_schema[r_col]
+            if l_type != r_type:
+                if l_type.is_integer() and r_type.is_integer():
+                    lf = lf.with_columns(pl.col(l_col).cast(pl.Int64))
+                    right_lf = right_lf.with_columns(pl.col(r_col).cast(pl.Int64))
+                elif l_type.is_float() or r_type.is_float():
+                    lf = lf.with_columns(pl.col(l_col).cast(pl.Float64))
+                    right_lf = right_lf.with_columns(pl.col(r_col).cast(pl.Float64))
 
-    return lf
+        lf = lf.join(right_lf, left_on=js.left_on, right_on=js.right_on, how=js.how)
+        return lf
 
 
 def _build_aggregation(
@@ -150,6 +161,13 @@ def _apply_window_aggregations(
 ) -> pl.LazyFrame:
     if not window_aggs:
         return lf
+
+    unique_sort_cols = list(
+        dict.fromkeys(
+            [col for win in window_aggs for col in win.partition_by + [win.order_by]]
+        )
+    )
+    lf = lf.sort(unique_sort_cols)
 
     window_exprs = []
     for win in window_aggs:

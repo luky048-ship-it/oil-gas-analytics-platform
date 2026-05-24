@@ -108,7 +108,6 @@ with DAG(
         storage_options = get_s3_storage_options()
         contract = SCHEMA_CONTRACTS[dataset]
 
-        # 1. Lazy Load
         lf = load_bronze_dataset(
             dataset_paths=partition_paths,
             storage_options=storage_options,
@@ -116,7 +115,6 @@ with DAG(
             time_column=contract.get("time_column"),
         )
 
-        # 2. Validate Schema
         schema_valid_lf, schema_invalid_lf = validate_dataset_schema(
             lf=lf,
             dataset=dataset,
@@ -133,7 +131,6 @@ with DAG(
                 storage_options=storage_options,
             )
 
-        # Если все строки невалидны из-за схемы — пропускаем дальнейшую обработку
         if schema_q_rows > 0 and schema_valid_lf.select(pl.len()).collect().item() == 0:
             logger.warning(
                 f"All rows quarantined due to schema violations. Skipping transformations."
@@ -147,7 +144,6 @@ with DAG(
 
         lf = schema_valid_lf
 
-        # 3 DQ
         dq_valid_lf, dq_invalid_lf = filter_by_data_quality(
             lf, validation_rules=contract.get("validation_rules", {})
         )
@@ -164,8 +160,7 @@ with DAG(
 
         lf = dq_valid_lf
 
-        # 4-6. Transformations
-        lf = normalize_dataset(lf, dataset, contract)
+        lf = normalize_dataset(lf, contract)
         lf = deduplicate_dataset(
             lf,
             key_columns=contract.get("dedup_key"),
@@ -180,7 +175,6 @@ with DAG(
             multiplier=3.0,
         )
 
-        # 7. quarantine
         out_q_rows = 0
         if invalid_lf is not None:
             out_q_rows = write_quarantine_dataset(
@@ -191,7 +185,6 @@ with DAG(
                 storage_options=storage_options,
             )
 
-        # 8. Write Silver
         output_path = write_silver_dataset(
             lf=valid_lf,
             dataset=dataset,
@@ -199,8 +192,12 @@ with DAG(
             storage_options=storage_options,
         )
 
-        # 9. Metrics & Watermark
-        processed_rows = valid_lf.select(pl.len()).collect().item()
+        processed_rows = (
+            pl.scan_parquet(output_path, storage_options=storage_options)
+            .select(pl.len())
+            .collect()
+            .item()
+        )
         q_rows = schema_q_rows + dq_q_rows + out_q_rows
         new_watermark = None
         if is_fact and contract.get("time_column"):
@@ -209,7 +206,7 @@ with DAG(
             )
             if max_time:
                 new_watermark = max_time
-                update_pipeline_watermark(dataset, new_watermark, target_date)
+                update_pipeline_watermark(dataset, new_watermark)
 
         t_end = datetime.now()
         result = PipelineExecutionResult(
@@ -233,7 +230,6 @@ with DAG(
             "status": "success",
         }
 
-    # --- Оркестрация ---
     dates_list = parse_execution_dates()
 
     dimension_groups = []
@@ -259,7 +255,15 @@ with DAG(
         else:
             dimension_groups.append(tg)
 
-    start >> dimension_groups >> fact_groups >> finish
+    for dg in dimension_groups:
+        start >> dg
+
+    for dg in dimension_groups:
+        for fg in fact_groups:
+            dg >> fg
+
+    for fg in fact_groups:
+        fg >> finish
 
     trigger_gold_dag = TriggerDagRunOperator(
         task_id="trigger_silver_gold_pipeline",

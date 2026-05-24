@@ -1,4 +1,4 @@
-# plugins/bronze_to_silver/quarantine_writer.py
+# /plugins/bronze_to_silver/quarantine_writer.py
 from typing import Any, Dict
 
 import polars as pl
@@ -14,7 +14,6 @@ def write_quarantine_dataset(
 ) -> int:
     """
     Обогащает невалидные записи метаданными и записывает их в слой Quarantine.
-    Возвращает количество отбракованных строк.
     """
     enriched_lf = invalid_lf.with_columns(
         [

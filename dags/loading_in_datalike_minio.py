@@ -1,3 +1,4 @@
+# dags/loading_in_datalike_minio.py
 from __future__ import annotations
 
 import logging
@@ -10,12 +11,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import s3fs
 from airflow import DAG
-from airflow.operators.empty import EmptyOperator
+from airflow.hooks.base import BaseHook
+from airflow.operators.python import PythonOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
-from airflow.providers.standard.operators.python import PythonOperator
-from airflow.providers.standard.operators.trigger_dagrun import \
-    TriggerDagRunOperator
-from airflow.sdk.bases.hook import BaseHook
 from psycopg2 import sql
 
 logger = logging.getLogger(__name__)
@@ -640,9 +639,8 @@ with DAG(
     trigger_next = TriggerDagRunOperator(
         task_id="trigger_bronze_to_silver",
         trigger_dag_id="bronze_to_silver_pipeline",
-        conf="{{ dag_run.conf }}",  # type: ignore
+        conf="{{ dag_run.conf }}",
         wait_for_completion=False,
     )
 
     extract_tasks >> trigger_next
-

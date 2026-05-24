@@ -46,7 +46,12 @@ def validate_dataframe(df: pl.DataFrame, spec: MartSpec) -> None:
         for rule in spec.business_rules:
             try:
                 query = f"SELECT count(*) FROM df WHERE NOT ({rule.rule})"
-                failed_rows = ctx.execute(query).collect().item()
+                res = ctx.execute(query)
+                failed_rows = (
+                    res.collect().item()
+                    if isinstance(res, pl.LazyFrame)
+                    else res.item()
+                )
 
                 if failed_rows > 0:
                     msg = f"DQ Error: {failed_rows} rows failed rule '{rule.rule}'"
@@ -143,17 +148,19 @@ def write_mart(
     staging_table_name = f"stg_{raw_table_name}_{run_hash}"
     staging_table_full = f"{STAGING_SCHEMA}.{staging_table_name}"
 
+    inserted_rows = 0
+    conn = get_psycopg2_conn()
+
     try:
         validate_dataframe(df, spec)
 
-        with get_psycopg2_conn() as conn:
+        with conn:
             with conn.cursor() as cur:
                 cur.execute(
                     CREATE_STAGING_TABLE.format(
                         staging_table=staging_table_full, target_table=target_table
                     )
                 )
-            conn.commit()
 
         logger.info(
             "Loading %d rows to '%s' via ADBC...", processed_rows, staging_table_full
@@ -167,7 +174,7 @@ def write_mart(
                     db_schema_name=STAGING_SCHEMA,
                 )
 
-        with get_psycopg2_conn() as conn:
+        with conn:
             with conn.cursor() as cur:
                 cur.execute(
                     DELETE_PARTITION_FROM_GOLD.format(target_table=target_table),
@@ -180,13 +187,20 @@ def write_mart(
                     (partition_dates,),
                 )
                 inserted_rows = cur.rowcount
-            conn.commit()
 
     finally:
-        with get_psycopg2_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(DROP_STAGING_TABLE.format(staging_table=staging_table_full))
-            conn.commit()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        DROP_STAGING_TABLE.format(staging_table=staging_table_full)
+                    )
+        except Exception as e:
+            logger.warning(
+                "Failed to drop staging table '%s': %s", staging_table_full, e
+            )
+        finally:
+            conn.close()
 
     exec_time = time.time() - start_time
     logger.info(

@@ -1,3 +1,4 @@
+# /plugins/bronze_to_silver/s3_utils.py
 from __future__ import annotations
 
 import logging
@@ -12,8 +13,7 @@ logger = logging.getLogger(__name__)
 
 def get_s3_storage_options(conn_id: str = "aws_default") -> Dict[str, Any]:
     """
-    Fetches S3 credentials from Airflow Connection.
-    Возвращает словарь с ключами, которые ожидает Polars (object_store) и S3.
+    Извлекает креды S3 из Airflow Connection (совместимо с 2.10.4).
     """
     try:
         conn = BaseHook.get_connection(conn_id)
@@ -49,7 +49,7 @@ def load_bronze_dataset(
     time_column: Optional[str] = None,
 ) -> pl.LazyFrame:
     """
-    Lazily loads parquet files from Bronze layer.
+    Лениво загружает parquet-файлы из Bronze слоя.
     """
     if not dataset_paths:
         return pl.LazyFrame()

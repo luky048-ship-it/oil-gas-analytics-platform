@@ -1,4 +1,4 @@
-# plugins/bronze_to_silver/silver_writer.py
+# /plugins/bronze_to_silver/silver_writer.py
 from typing import Any, Dict, Optional
 
 import polars as pl
@@ -12,8 +12,7 @@ def write_silver_dataset(
     silver_base: str = "s3://datalake/silver",
 ) -> str:
     """
-    Записывает LazyFrame в Silver слой, используя sink_parquet для избежания OOM.
-    Для фактов формирует Hive-партицию по дате, для измерений пишет в один файл.
+    Записывает LazyFrame в Silver слой с использованием sink_parquet (OOM-safe).
     """
     base_dir = f"{silver_base}/{dataset}"
 

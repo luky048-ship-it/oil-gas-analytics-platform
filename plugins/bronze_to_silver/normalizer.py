@@ -1,4 +1,4 @@
-# plugins/bronze_to_silver/normalizer.py
+# /plugins/bronze_to_silver/normalizer.py
 from datetime import datetime, timezone
 from typing import Any, Dict
 
@@ -6,7 +6,7 @@ import polars as pl
 
 
 def normalize_dataset(
-    lf: pl.LazyFrame, dataset: str, schema_contract: Dict[str, Any]
+    lf: pl.LazyFrame, schema_contract: Dict[str, Any]
 ) -> pl.LazyFrame:
     """
     Нормализует типы данных, стандартизирует временные метки (UTC, обрезает до секунд)
@@ -21,7 +21,7 @@ def normalize_dataset(
 
         if dtype.base_type() == pl.Datetime:
             expr = expr.dt.truncate("1s")
-        elif dtype.base_type() in (pl.Float32, pl.Float64):
+        elif dtype.is_float():
             expr = (
                 pl.when(expr.is_nan() | expr.is_infinite()).then(None).otherwise(expr)
             )

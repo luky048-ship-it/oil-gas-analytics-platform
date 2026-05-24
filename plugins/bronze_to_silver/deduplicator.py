@@ -1,4 +1,4 @@
-# plugins/bronze_to_silver/deduplicator.py
+# /plugins/bronze_to_silver/deduplicator.py
 from typing import List, Optional
 
 import polars as pl
