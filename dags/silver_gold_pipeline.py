@@ -39,7 +39,6 @@ with DAG(
     render_template_as_native_obj=True,
 ) as dag:
 
-    start = EmptyOperator(task_id="start")
     finish = EmptyOperator(task_id="finish")
 
     @task
@@ -82,12 +81,18 @@ with DAG(
             if not dates:
                 return
 
+            lf_prod = load_silver_dataset(SILVER_PRODUCTION, dates)
+            if lf_prod is None:
+                logger.warning(
+                    "No production data found for dates: %s. Skipping mart generation.",
+                    dates,
+                )
+                return
+
             context = get_current_context()
             run_id = context["run_id"]
-
             spec = MART_CONTRACTS["mart_production"]
 
-            lf_prod = load_silver_dataset(SILVER_PRODUCTION, dates)
             lf_tele = load_silver_dataset(SILVER_TELEMETRY, dates)
             lf_targ = load_silver_dataset(SILVER_TARGETS, dates)
 
@@ -124,6 +129,12 @@ with DAG(
             """
             lf_prod_batch = load_gold_dataset(TABLE_MART_PRODUCTION, query=batch_query)
 
+            if lf_prod_batch.collect_schema().len() == 0:
+                logger.warning(
+                    "Target table gold.mart_production is empty. Skipping KPI mart."
+                )
+                return
+
             window_days = ANALYSIS_PARAMS.get("kpi_rolling_window", 7)
             hist_min_date = (min_date_dt - timedelta(days=window_days)).strftime(
                 "%Y-%m-%d"
@@ -154,16 +165,28 @@ with DAG(
         def build_failures_task(dates: list[str]) -> None:
             if not dates:
                 return
+
+            lf_sensors = load_silver_dataset(SILVER_PUMP_SENSORS, dates)
+            if lf_sensors is None:
+                logger.warning(
+                    "No pump sensors data found for dates: %s. Skipping mart generation.",
+                    dates,
+                )
+                return
+
             context = get_current_context()
             run_id = context["run_id"]
-
             spec = MART_CONTRACTS["mart_failures"]
+
+            lf_failures = load_silver_dataset(SILVER_PUMP_FAILURES, dates)
+            lf_pumps = load_silver_dataset("pumps")
+
             lf_result = build_mart(
                 spec,
                 {
-                    "pump_sensors": load_silver_dataset(SILVER_PUMP_SENSORS, dates),
-                    "pump_failures": load_silver_dataset(SILVER_PUMP_FAILURES, dates),
-                    "pumps": load_silver_dataset("pumps"),
+                    "pump_sensors": lf_sensors,
+                    "pump_failures": lf_failures,
+                    "pumps": lf_pumps,
                 },
             )
 
@@ -177,16 +200,28 @@ with DAG(
         def build_logistics_task(dates: list[str]) -> None:
             if not dates:
                 return
+
+            lf_deliveries = load_silver_dataset(SILVER_DELIVERIES, dates)
+            if lf_deliveries is None:
+                logger.warning(
+                    "No deliveries data found for dates: %s. Skipping mart generation.",
+                    dates,
+                )
+                return
+
             context = get_current_context()
             run_id = context["run_id"]
-
             spec = MART_CONTRACTS["mart_logistics"]
+
+            lf_drivers = load_silver_dataset(SILVER_DRIVERS)
+            lf_vehicles = load_silver_dataset(SILVER_VEHICLES)
+
             lf_result = build_mart(
                 spec,
                 {
-                    "deliveries": load_silver_dataset(SILVER_DELIVERIES, dates),
-                    "drivers": load_silver_dataset(SILVER_DRIVERS),
-                    "vehicles": load_silver_dataset(SILVER_VEHICLES),
+                    "deliveries": lf_deliveries,
+                    "drivers": lf_drivers,
+                    "vehicles": lf_vehicles,
                 },
             )
 
@@ -203,5 +238,3 @@ with DAG(
 
         prod >> well_kpi
         [well_kpi, failures, logistics] >> finish
-
-    start >> process_marts

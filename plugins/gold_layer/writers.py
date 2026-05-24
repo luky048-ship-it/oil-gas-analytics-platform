@@ -10,8 +10,7 @@ from gold_layer.config import MartSpec
 from gold_layer.connections import get_postgres_uri, get_psycopg2_conn
 from gold_layer.constants import STAGING_SCHEMA
 from gold_layer.models import MartBuildResult
-from gold_layer.sql_templates import (CREATE_STAGING_TABLE,
-                                      DELETE_PARTITION_FROM_GOLD,
+from gold_layer.sql_templates import (DELETE_PARTITION_FROM_GOLD,
                                       DROP_STAGING_TABLE,
                                       INSERT_FROM_STAGING_TO_GOLD)
 
@@ -104,27 +103,22 @@ def write_mart(
         business_columns = [col for col in df.columns if col not in excluded_cols]
         columns_sql_str = ", ".join(business_columns)
 
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    CREATE_STAGING_TABLE.format(
-                        staging_table=staging_table_full, target_table=target_table
-                    )
-                )
-
-        logger.info(
-            "Loading %d rows to '%s' via ADBC...", processed_rows, staging_table_full
-        )
         df_to_load = df.select(business_columns)
 
+        logger.info(
+            "Loading %d rows to '%s' via ADBC (mode='create')...",
+            processed_rows,
+            staging_table_full,
+        )
         with adbc_dbapi.connect(get_postgres_uri()) as adbc_conn:
             with adbc_conn.cursor() as adbc_cur:
                 adbc_cur.adbc_ingest(
                     table_name=staging_table_name,
                     data=df_to_load.to_arrow(),
-                    mode="append",
+                    mode="create",
                     db_schema_name=STAGING_SCHEMA,
                 )
+            adbc_conn.commit()
 
         with conn:
             with conn.cursor() as cur:
@@ -141,8 +135,10 @@ def write_mart(
                     staging_table=staging_table_full,
                     columns=columns_sql_str,
                 )
-                logger.info("Inserting records from staging into gold table...")
-                cur.execute(insert_query, (partition_dates_str,))
+                logger.info(
+                    "Inserting records from staging into gold table with implicit cast..."
+                )
+                cur.execute(insert_query)
                 inserted_rows = cur.rowcount
 
     finally:

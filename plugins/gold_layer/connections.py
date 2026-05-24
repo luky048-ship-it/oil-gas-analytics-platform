@@ -1,3 +1,4 @@
+# plugins/gold_layer/connections.py
 import logging
 import os
 from typing import Any, Dict
@@ -38,7 +39,7 @@ def _get_aws_connection_details() -> Dict[str, Any]:
 
 
 def get_s3_fs() -> s3fs.S3FileSystem:
-    """Возвращает s3fs для файловых операций (поиск новых партиций через ls/glob)."""
+    """Возвращает s3fs для файловых операций."""
     details = _get_aws_connection_details()
     endpoint_url = details["endpoint_url"]
     return s3fs.S3FileSystem(
@@ -55,19 +56,41 @@ def get_s3_fs() -> s3fs.S3FileSystem:
 def get_s3_storage_options() -> Dict[str, Any]:
     """
     Формирует словарь storage_options специально под нативный движок Polars 1.4+.
-    Используется в loaders.py для scan_parquet/write_parquet.
     """
-    details = _get_aws_connection_details()
-    options = {
-        "aws_access_key_id": details["access_key"],
-        "aws_secret_access_key": details["secret_key"],
-        "aws_region": details["region"],
-    }
-    if details["endpoint_url"]:
-        options["endpoint_url"] = details["endpoint_url"]
-        if "http://" in details["endpoint_url"]:
-            options["aws_allow_http"] = True
-    return options
+    try:
+        conn = BaseHook.get_connection(AWS_CONN_ID)
+        extra = conn.extra_dejson
+
+        options = {
+            "aws_access_key_id": conn.login or os.getenv("MINIO_ROOT_USER", "admin"),
+            "aws_secret_access_key": conn.password
+            or os.getenv("MINIO_ROOT_PASSWORD", "password"),
+            "aws_allow_http": "true",
+        }
+
+        endpoint_url = extra.get(
+            "endpoint_url", os.getenv("MINIO_ENDPOINT_URL", "http://minio:9000")
+        )
+        if endpoint_url:
+            options["aws_endpoint_url"] = endpoint_url
+
+        region_name = extra.get("region_name", "us-east-1")
+        if region_name:
+            options["aws_region"] = region_name
+
+        return options
+
+    except Exception as e:
+        logger.warning(
+            f"Connection {AWS_CONN_ID} not found: {e}. Using local MinIO defaults."
+        )
+        return {
+            "aws_access_key_id": os.getenv("MINIO_ROOT_USER", "admin"),
+            "aws_secret_access_key": os.getenv("MINIO_ROOT_PASSWORD", "password"),
+            "aws_endpoint_url": os.getenv("MINIO_ENDPOINT_URL", "http://minio:9000"),
+            "aws_region": "us-east-1",
+            "aws_allow_http": "true",
+        }
 
 
 def get_postgres_uri() -> str:

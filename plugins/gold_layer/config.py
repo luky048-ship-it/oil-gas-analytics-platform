@@ -84,7 +84,7 @@ class MartSpec:
     joins: List[JoinSpec] = field(default_factory=list)
     # Вычисляемые колонки
     derived_columns: List[DerivedColumn] = field(default_factory=list)
-    # Финальный набор колонок и их Polars-типы (соответствует DDL)
+    # Финальный набор колок и их Polars-типы (соответствует DDL)
     output_schema: Dict[str, Union[pl.DataType, type[pl.DataType]]] = field(
         default_factory=dict
     )
@@ -146,7 +146,7 @@ MART_CONTRACTS = {
             ),
             DerivedColumn(
                 "downtime_pct",
-                "pl.min_horizontal(" "pl.col('downtime_hours') / 24 * 100, 100.0" ")",
+                "pl.min_horizontal(pl.col('downtime_hours') / 24 * 100, 100.0)",
             ),
         ],
         output_schema={
@@ -182,16 +182,21 @@ MART_CONTRACTS = {
         source_tables=["mart_production_batch", "mart_production_history"],
         group_by=["well_id", "date"],
         aggregations=[
-            ColumnMapping("oil_ton", "production", "oil_ton", "first", 0.0),
+            ColumnMapping("oil_ton", "mart_production", "oil_ton", "first", 0.0),
             ColumnMapping(
-                "downtime_hours", "production", "downtime_hours", "first", 0.0
+                "downtime_hours", "mart_production", "downtime_hours", "first", 0.0
             ),
-            ColumnMapping("daily_target_ton", "well_targets", "daily_oil_ton", "first"),
+            ColumnMapping(
+                "daily_target_ton", "mart_production", "daily_target_ton", "first"
+            ),
+            ColumnMapping(
+                "downtime_pct", "mart_production", "downtime_pct", "first", 0.0
+            ),
         ],
         window_aggregations=[
             WindowAggregation(
                 "avg_daily_oil",
-                "production",
+                "mart_production",
                 "oil_ton",
                 agg_func="mean",
                 partition_by=["well_id"],
@@ -200,7 +205,7 @@ MART_CONTRACTS = {
             ),
             WindowAggregation(
                 "total_oil",
-                "production",
+                "mart_production",
                 "oil_ton",
                 agg_func="sum",
                 partition_by=["well_id"],
@@ -209,7 +214,7 @@ MART_CONTRACTS = {
             ),
             WindowAggregation(
                 "best_day_oil",
-                "production",
+                "mart_production",
                 "oil_ton",
                 agg_func="max",
                 partition_by=["well_id"],
@@ -218,7 +223,7 @@ MART_CONTRACTS = {
             ),
             WindowAggregation(
                 "worst_day_oil",
-                "production",
+                "mart_production",
                 "oil_ton",
                 agg_func="min",
                 partition_by=["well_id"],
@@ -227,8 +232,8 @@ MART_CONTRACTS = {
             ),
             WindowAggregation(
                 "avg_downtime_pct",
-                "production",
-                "downtime_hours",
+                "mart_production",
+                "downtime_pct",
                 agg_func="mean",
                 partition_by=["well_id"],
                 order_by="date",
@@ -244,7 +249,7 @@ MART_CONTRACTS = {
             ),
             DerivedColumn(
                 "production_rank",
-                "pl.col('oil_ton').rank('dense', descending=True)" ".over('date')",
+                "pl.col('oil_ton').rank('dense', descending=True).over('date')",
             ),
             DerivedColumn(
                 "performance_group",
@@ -397,6 +402,7 @@ MART_CONTRACTS = {
             ),
         ],
         derived_columns=[
+            DerivedColumn("driver_name", "pl.col('name')"),
             DerivedColumn(
                 "cost_per_km",
                 "pl.when(pl.col('distance_km') > 0)"
@@ -413,10 +419,10 @@ MART_CONTRACTS = {
             DerivedColumn(
                 "weather_impact",
                 "pl.when(pl.col('weather_conditions').str.contains("
-                "'storm|rain|snow'"
+                "'(?i)storm|rain|snow'"
                 ")).then(pl.lit('high'))"
                 ".when(pl.col('weather_conditions').str.contains("
-                "'cloud|wind'"
+                "'(?i)cloud|wind|fog'"
                 ")).then(pl.lit('medium'))"
                 ".otherwise(pl.lit('low'))",
             ),

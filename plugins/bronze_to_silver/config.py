@@ -22,7 +22,13 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "dedup_key": ["well_id"],
         "validation_rules": {
             "enums": {
-                "status": ["active", "inactive", "maintenance", "decommissioned"]
+                "status": [
+                    "active",
+                    "inactive",
+                    "maintenance",
+                    "decommissioned",
+                    "suspended",
+                ]
             },
             "ranges": {},
             "custom": [{"rule": "start_date <= current_date", "severity": "HIGH"}],
@@ -236,6 +242,10 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
                     "seal_failure",
                     "vibration_alarm",
                     "pressure_loss",
+                    "bearing vibration",
+                    "bearing_vibration",
+                    "electrical fault",
+                    "electrical_fault",
                     "unknown",
                 ]
             },
@@ -271,7 +281,14 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "dedup_key": ["delivery_id"],
         "validation_rules": {
             "enums": {
-                "product_type": ["crude_oil", "condensate", "diesel", "drilling_fluids"]
+                "product_type": [
+                    "crude_oil",
+                    "condensate",
+                    "diesel",
+                    "drilling_fluids",
+                    "gasoline",
+                    "kerosene",
+                ]
             },
             "ranges": {
                 "volume_ton": {"min": 0.0},
@@ -321,7 +338,9 @@ SCHEMA_CONTRACTS: Dict[str, Dict[str, Any]] = {
         "time_column": None,
         "dedup_key": ["vehicle_id"],
         "validation_rules": {
-            "enums": {"fuel_type": ["diesel", "gasoline", "electric", "hybrid", "lng"]},
+            "enums": {
+                "fuel_type": ["diesel", "gasoline", "electric", "hybrid", "lng", "gas"]
+            },
             "ranges": {"capacity_ton": {"min": 0.0001}},
             "custom": [],
         },

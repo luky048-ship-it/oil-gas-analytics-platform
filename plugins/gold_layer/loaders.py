@@ -13,11 +13,9 @@ logger = logging.getLogger(__name__)
 
 def load_silver_dataset(
     table_name: str, partition_dates: Optional[List[str]] = None
-) -> pl.LazyFrame:
+) -> Optional[pl.LazyFrame]:
     """
     Создаёт ленивый граф вычислений (LazyFrame) над Parquet-файлами в S3.
-    Использует нативные storage_options Polars для безопасного подключения к MinIO/S3
-    (поддержка aws_allow_http). Автоматически извлекает Hive-партиции.
     """
     fs = get_s3_fs()
     s3_options = get_s3_storage_options()
@@ -40,7 +38,7 @@ def load_silver_dataset(
                 table_name,
                 partition_dates,
             )
-            return pl.LazyFrame()
+            return None
 
         logger.info(
             "Loading '%s' from %d selected partitions.", table_name, len(existing_paths)
@@ -60,7 +58,6 @@ def discover_new_partitions(
 ) -> List[str]:
     """
     Сканирует иерархию директорий Silver-слоя для поиска новых партиций.
-    Сравнивает извлечённые даты с last_watermark.
     """
     if isinstance(last_watermark, str):
         try:
@@ -108,12 +105,9 @@ def discover_new_partitions(
 def load_gold_dataset(table_name: str, query: Optional[str] = None) -> pl.LazyFrame:
     """
     Синхронно вычитывает Gold-датасет из Postgres и переводит его в LazyFrame.
-
-    Рекомендуется передавать параметр `query` для ограничения объёма (Pushdown),
-    так как данные сначала полностью загружаются в RAM.
+    Использует Polars read_database_uri для прямой интеграции с ADBC.
     """
     uri = get_postgres_uri()
-
     sql = query if query else f"SELECT * FROM {table_name}"
 
     if not query:
@@ -125,12 +119,13 @@ def load_gold_dataset(table_name: str, query: Optional[str] = None) -> pl.LazyFr
 
     try:
         try:
-            df = pl.read_database(sql, connection=uri, engine="adbc")
-        except (ImportError, RuntimeError):
+            df = pl.read_database_uri(sql, uri=uri, engine="adbc")
+        except (ImportError, RuntimeError, TypeError) as e:
             logger.warning(
-                "ADBC not available, falling back to default Polars DB engine."
+                "ADBC not available or failed, falling back to default Polars DB engine: %s",
+                e,
             )
-            df = pl.read_database(sql, connection=uri)
+            df = pl.read_database_uri(sql, uri=uri)
 
         logger.info("Successfully loaded %d records from '%s'.", len(df), table_name)
         return df.lazy()

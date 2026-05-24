@@ -1,4 +1,4 @@
-# gold_layer/generic_builder.py
+# plugins/gold_layer/generic_builder.py
 from __future__ import annotations
 
 import logging
@@ -12,6 +12,51 @@ from gold_layer.config import (ANALYSIS_PARAMS, ColumnMapping, DerivedColumn,
 logger = logging.getLogger(__name__)
 
 
+def _fix_adbc_numerics(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """
+    Устраняет поведение adbc-driver-postgresql, при котором NUMERIC
+    считывается как pl.String. Автоматически приводит числовые колонки
+    обратно к Float64 на базе эвристики имен.
+    """
+    schema = lf.collect_schema()
+    cast_exprs = []
+
+    str_keywords = {
+        "name",
+        "region",
+        "operator",
+        "status",
+        "type",
+        "manufacturer",
+        "model",
+        "source",
+        "destination",
+        "conditions",
+        "plate",
+        "fuel",
+        "impact",
+        "reason",
+        "group",
+        "id",
+        "dag_run",
+        "path",
+        "hash",
+    }
+
+    for col_name, dtype in schema.items():
+        if dtype == pl.String:
+            if not any(k in col_name.lower() for k in str_keywords):
+                logger.info(
+                    "Auto-casting likely ADBC-stringified NUMERIC column '%s' to Float64",
+                    col_name,
+                )
+                cast_exprs.append(pl.col(col_name).cast(pl.Float64, strict=False))
+
+    if cast_exprs:
+        return lf.with_columns(cast_exprs)
+    return lf
+
+
 def _get_max_window_days(spec: MartSpec) -> int:
     max_days = 0
     for win in spec.window_aggregations:
@@ -23,12 +68,8 @@ def _get_max_window_days(spec: MartSpec) -> int:
 
 def _prepare_and_concat_sources(
     spec: MartSpec,
-    lf_dict: Dict[str, pl.LazyFrame],
+    lf_dict: Dict[str, Optional[pl.LazyFrame]],
 ) -> tuple[pl.LazyFrame, Optional[date]]:
-    """
-    Объединяет базовые таблицы (batch + history), исключая измерения (они джойнятся позже).
-    Возвращает общий LazyFrame и минимальную дату батча (для последующего отсечения истории).
-    """
     joined_tables = {j.right_table for j in spec.joins}
     base_tables = [t for t in spec.source_tables if t not in joined_tables]
 
@@ -40,8 +81,8 @@ def _prepare_and_concat_sources(
     min_batch_date = None
 
     for t in base_tables:
-        if t not in lf_dict:
-            logger.warning("Base table '%s' not found, skipping", t)
+        if t not in lf_dict or lf_dict[t] is None:
+            logger.warning("Base table '%s' not found or empty, skipping", t)
             continue
 
         lf = lf_dict[t]
@@ -88,7 +129,6 @@ def _prepare_and_concat_sources(
 def _apply_joins(
     lf: pl.LazyFrame, joins: List[JoinSpec], lf_dict: Dict[str, pl.LazyFrame]
 ) -> pl.LazyFrame:
-    """Безопасные джойны ДО агрегации с кастингом ключей к String."""
     for i, js in enumerate(joins):
         right_lf = lf_dict.get(js.right_table)
         if right_lf is None:
@@ -121,13 +161,13 @@ def _apply_joins(
                     right_lf = right_lf.with_columns(pl.col(r_col).cast(pl.Float64))
 
         lf = lf.join(right_lf, left_on=js.left_on, right_on=js.right_on, how=js.how)
-        return lf
+
+    return lf
 
 
 def _build_aggregation(
     lf: pl.LazyFrame, group_by: List[str], aggregations: List[ColumnMapping]
 ) -> pl.LazyFrame:
-    """Агрегация. Колонки из JOIN, не указанные здесь, будут удалены."""
     if not group_by or not aggregations:
         return lf
 
@@ -136,12 +176,7 @@ def _build_aggregation(
     agg_exprs = []
     for cm in aggregations:
         func = cm.agg_func or "first"
-
-        col_expr = (
-            pl.col(cm.source_col).drop_nulls()
-            if func != "first"
-            else pl.col(cm.source_col)
-        )
+        col_expr = pl.col(cm.source_col).drop_nulls()
 
         if func == "zscore":
             raise ValueError("zscore is only supported in window_aggregations")
@@ -150,6 +185,9 @@ def _build_aggregation(
 
         if cm.default is not None:
             expr = expr.fill_null(cm.default)
+
+        if func in ("sum", "mean") or isinstance(cm.default, float):
+            expr = expr.cast(pl.Float64, strict=False)
 
         agg_exprs.append(expr.alias(cm.target))
 
@@ -174,7 +212,7 @@ def _apply_window_aggregations(
         raw_size = params.get(win.window_expr, win.window_expr)
 
         if "kpi" in win.window_expr.lower():
-            window_size_rows = int(raw_size)  # 7 дней = 7 строк
+            window_size_rows = int(raw_size)
         elif "risk" in win.window_expr.lower():
             logger.warning(
                 "Converting minute-based window to estimated row-count (56 rows for 7 days)."
@@ -185,13 +223,22 @@ def _apply_window_aggregations(
 
         col_expr = pl.col(win.source_col)
 
+        if win.agg_func in ("mean", "sum", "max", "min", "zscore"):
+            col_expr = col_expr.cast(pl.Float64, strict=False)
+
         if win.agg_func in ("mean", "sum", "max", "min"):
             expr = getattr(col_expr, f"rolling_{win.agg_func}")(
-                window_size=window_size_rows
+                window_size=window_size_rows, min_periods=1
             )
         elif win.agg_func == "zscore":
-            mean_expr = col_expr.rolling_mean(window_size=window_size_rows)
-            std_expr = col_expr.rolling_std(window_size=window_size_rows).fill_null(0.0)
+            mean_expr = col_expr.rolling_mean(
+                window_size=window_size_rows, min_periods=1
+            )
+            std_expr = (
+                col_expr.rolling_std(window_size=window_size_rows, min_periods=1)
+                .fill_nan(0.0)
+                .fill_null(0.0)
+            )
             expr = (
                 pl.when(std_expr > 0.0)
                 .then((col_expr - mean_expr) / std_expr)
@@ -207,12 +254,10 @@ def _apply_window_aggregations(
 
 
 def _derive_columns(lf: pl.LazyFrame, derivations: List[DerivedColumn]) -> pl.LazyFrame:
-    """Бизнес-правила и производные формулы."""
     if not derivations:
         return lf
 
     safe_env = {"pl": pl, "ANALYSIS_PARAMS": ANALYSIS_PARAMS}
-    exprs = []
 
     for dc in derivations:
         logger.info("Derived column: %s", dc.target)
@@ -230,18 +275,30 @@ def _derive_columns(lf: pl.LazyFrame, derivations: List[DerivedColumn]) -> pl.La
                     f"Condition evaluation failed for '{dc.target}': {e}"
                 ) from e
 
-        exprs.append(expr.alias(dc.target))
+        lf = lf.with_columns(expr.alias(dc.target))
 
-    return lf.with_columns(exprs)
+    return lf
 
 
 def _apply_output_schema(lf: pl.LazyFrame, spec: MartSpec) -> pl.LazyFrame:
-    """Контроль качества схемы и генерация суррогатных ключей."""
     output_schema = spec.output_schema
     current_cols = set(lf.collect_schema().names())
 
+    if "driver_name" in output_schema and "driver_name" not in current_cols:
+        if "name" in current_cols:
+            logger.info(
+                "Dynamically mapping source 'name' to 'driver_name' to fix cache lag for '%s'",
+                spec.table_name,
+            )
+            lf = lf.with_columns(pl.col("name").alias("driver_name"))
+            current_cols.add("driver_name")
+
     if "load_timestamp" in output_schema and "load_timestamp" not in current_cols:
-        lf = lf.with_columns(pl.lit(datetime.now(timezone.utc)).alias("load_timestamp"))
+        lf = lf.with_columns(
+            pl.lit(datetime.now(timezone.utc))
+            .dt.replace_time_zone(None)
+            .alias("load_timestamp")
+        )
         current_cols.add("load_timestamp")
 
     if "partition_date" in output_schema and "partition_date" not in current_cols:
@@ -292,30 +349,52 @@ def build_mart(
     params = params or ANALYSIS_PARAMS
     logger.info("Building mart: %s", spec.table_name)
 
-    # 1. Подготовка базовых данных (батч + история)
     lf, min_batch_date = _prepare_and_concat_sources(spec, lf_dict)
 
-    # 2. Строгая дедупликация по полному primary_key
+    lf = _fix_adbc_numerics(lf)
+
     if spec.primary_key:
         lf = lf.unique(subset=spec.primary_key, keep="last")
 
-    # 3. Джойны (обогащение измерениями) – ДО агрегации
     lf = _apply_joins(lf, spec.joins, lf_dict)
 
-    # 4. Агрегация
-    lf = _build_aggregation(lf, spec.group_by or [], spec.aggregations)
+    lf = _fix_adbc_numerics(lf)
 
-    # 5. Оконные функции
+    active_aggregations = list(spec.aggregations) if spec.aggregations else []
+    existing_agg_targets = {am.target for am in active_aggregations}
+
+    if spec.window_aggregations:
+        src_cols = lf.collect_schema().names()
+        for win in spec.window_aggregations:
+            if win.source_col not in existing_agg_targets and win.source_col not in (
+                spec.group_by or []
+            ):
+                if win.source_col in src_cols:
+                    logger.info(
+                        "Dynamically adding missing window source column '%s' to active aggregations of '%s'",
+                        win.source_col,
+                        spec.table_name,
+                    )
+                    active_aggregations.append(
+                        ColumnMapping(
+                            target=win.source_col,
+                            source_table=win.source_table,
+                            source_col=win.source_col,
+                            agg_func="first",
+                            default=0.0,
+                        )
+                    )
+                    existing_agg_targets.add(win.source_col)
+
+    lf = _build_aggregation(lf, spec.group_by or [], active_aggregations)
+
     lf = _apply_window_aggregations(lf, spec.window_aggregations, params)
 
-    # 6. Отсечение истории – оставляем только строки текущего батча
     if min_batch_date and spec.partition_column:
         lf = lf.filter(pl.col(spec.partition_column) >= min_batch_date)
 
-    # 7. Производные колонки
     lf = _derive_columns(lf, spec.derived_columns)
 
-    # 8. Финальная схема
     lf = _apply_output_schema(lf, spec)
 
     logger.info("Mart '%s' built successfully.", spec.table_name)
